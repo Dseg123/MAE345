@@ -1,392 +1,613 @@
+"""
+mppi_and_ilqr.py
+
+Self-contained demo of:
+ - separated dynamics (f, G, B, dynamics)
+ - iLQR (finite-horizon)
+ - BaseMPPI (classic PI control)
+ - RefinedMPPI (paper-style using H^{-1} G)
+
+Requires: numpy
+"""
+
 import numpy as np
-import matplotlib.pyplot as plt
 
-np.random.seed(0)
+# --------------------------
+# Dynamics (bicycle demo)
+# --------------------------
+L = 2.5  # wheelbase (example)
 
-# ---------- dynamics: simple bicycle-like with nonlinear drag and slip ----------
-# state: [x, y, theta, v]
-# control: [a, delta]  (acceleration, steering angle)
-L = 0.5  # wheelbase
+def f(x):
+    """Passive drift (state derivative, not dt-multiplied).
+    x = [px, py, theta, v]
+    """
+    px, py, theta, v = x
+    beta = 0.0  # slip angle w/o steering baseline
+    return np.array([
+        v * np.cos(theta + beta),
+        v * np.sin(theta + beta),
+        0.0,
+        -0.2 * v**3
+    ])
+
+def G(x):
+    """Control-effectiveness matrix (4 x 2) for u = [a, delta].
+    This is a simple (approximate) mapping: 'a' affects velocity directly;
+    'delta' affects heading (approx v/L).
+    """
+    px, py, theta, v = x
+    # a -> dv/dt
+    g_a = np.array([0.0, 0.0, 0.0, 1.0])
+    # delta -> dtheta/dt approx v/L (we neglect small nonlinear terms in position derivatives)
+    g_delta = np.array([0.0, 0.0, v / L if L != 0 else 0.0, 0.0])
+    return np.column_stack([g_a, g_delta])  # shape (4,2)
+
+def B(x):
+    """Diffusion matrix (4 x r) mapping Brownian noise to state-space.
+    Use r = 4 (full-state independent noise) by default.
+    """
+    return np.eye(4)
 
 def dynamics(x, u, dt, w=None):
+    """Discrete-time stochastic dynamics:
+       x_{t+1} = x_t + (f(x) + G(x) u) * dt + B(x) * w * sqrt(dt)
+       w should have shape (r,) where r = B.shape[1]. If None, no noise.
     """
-    Stochastic bicycle dynamics with additive diffusion.
-    w: noise vector (size n or r), scaled by sqrt(dt)
-    """
-    x_new = x.copy()
-    a, delta = u
-    v = x[3]
-    beta = np.arctan(0.5 * np.tan(delta))
-    x_new[0] += v * np.cos(x[2] + beta) * dt
-    x_new[1] += v * np.sin(x[2] + beta) * dt
-    x_new[2] += (v / L) * np.tan(delta) * dt
-    x_new[3] += (a - 0.2 * v**3) * dt
+    x = np.asarray(x)
+    u = np.asarray(u)
+    drift = f(x)
+    control_contrib = G(x) @ u
+    x_next = x + (drift + control_contrib) * dt
     if w is not None:
-        B = np.eye(4)  # diffusion matrix (can generalize)
-        x_new += B @ w * np.sqrt(dt)  # correct SDE scaling
-    return x_new
+        x_next = x_next + (B(x) @ np.asarray(w)) * np.sqrt(dt)
+    return x_next
 
-# finite-difference Jacobians for linearization (fx, fu)
-def finite_difference_jacobians(x, u, dt, eps=1e-5):
+# --------------------------
+# Helpers: cost, rollouts, jacobians
+# --------------------------
+def quad_cost(x, u, x_goal=None, Q=None, R=None):
+    """Simple running cost function.
+       q(x) = (x-x_goal)^T Q (x-x_goal)  ;  0.5 u^T R u
+    """
+    if Q is None:
+        Q = np.diag([1.0, 1.0, 0.1, 0.1])
+    if R is None:
+        R = np.diag([0.1, 0.1])
+    if x_goal is None:
+        x_goal = np.zeros_like(x)
+    dx = x - x_goal
+    return float(dx.T @ Q @ dx + 0.5 * u.T @ R @ u)
+
+def finite_difference_jacobian(func, x, u, eps=1e-5):
+    """Return A,B where for discrete-time x_{t+1} = x + (f(x)+G(x)u)dt + ...
+       We linearize the map F(x,u) = x_next (without noise) so A = dF/dx, B = dF/du.
+       Uses finite differences.
+    """
+    x = np.asarray(x)
+    u = np.asarray(u)
     n = x.size
     m = u.size
-    f0 = dynamics(x, u, dt)
-    fx = np.zeros((n, n))
-    fu = np.zeros((n, m))
+    base = func(x, u)
+    A = np.zeros((n, n))
+    Bmat = np.zeros((n, m))
+    # perturb states
     for i in range(n):
-        xp = x.copy(); xp[i] += eps
-        fx[:, i] = (dynamics(xp, u, dt) - f0) / eps
+        xp = x.copy()
+        xp[i] += eps
+        Ap = func(xp, u)
+        A[:, i] = (Ap - base) / eps
     for j in range(m):
-        up = u.copy(); up[j] += eps
-        fu[:, j] = (dynamics(x, up, dt) - f0) / eps
-    return fx, fu
+        up = u.copy()
+        up[j] += eps
+        Bp = func(x, up)
+        Bmat[:, j] = (Bp - base) / eps
+    return A, Bmat
 
-# ---------- cost ----------
-goal = np.array([8.0, 0.0])
+def discrete_dynamics_map(x, u, dt):
+    """Helper mapping F(x,u) = x_next (deterministic, no noise)"""
+    return dynamics(x, u, dt, w=None)
 
-def running_cost(x, u):
-    pos_err = np.linalg.norm(x[:2] - goal)
-    desired_heading = np.arctan2(goal[1]-x[1], goal[0]-x[0])
-    heading_err = np.arctan2(np.sin(desired_heading - x[2]), np.cos(desired_heading - x[2]))
-    v = x[3]
-    v_err = (v - 3.0)**2
-    u_cost = 0.02 * (u[0]**2 + u[1]**2)
-    return 1.0*pos_err + 0.5*abs(heading_err) + 0.2*v_err + u_cost
+# -------------------------
+# Cost
+# -------------------------
+def make_quadratic_cost(x_goal, Q=None, R=None):
+    if Q is None:
+        Q = np.diag([1.0, 1.0, 0.1, 0.1])
+    if R is None:
+        R = np.diag([0.1, 0.1])
 
-def terminal_cost(x):
-    pos_err = np.linalg.norm(x[:2] - goal)
-    return 10.0 * pos_err
+    def cost_fn(x, u):
+        dx = x - x_goal
+        return float(dx.T @ Q @ dx + 0.5 * u.T @ R @ u)
+    return cost_fn
 
-# ---------- rollout ----------
-def rollout(x0, U, dt, noise_seq=None):
-    x = x0.copy()
-    xs = [x.copy()]
-    cost = 0.0
-    for k, u in enumerate(U):
-        if noise_seq is not None:
-            uk = u + noise_seq[k]
-            # stochastic dynamics: noise already included in noise_seq?
-            w = None
-        else:
-            uk = u
-            w = None
-        cost += running_cost(x, uk) * dt
-        x = dynamics(x, uk, dt, w)
-        xs.append(x.copy())
-    cost += terminal_cost(xs[-1])
-    return np.array(xs), cost
-
-# ---------- Shooting baseline ----------
-def random_shooting(x0, N, K=1024, sigma=(0.8, 0.3), dt=0.05):
-    m = 2
-    sig = np.array(sigma)
-    costs = np.zeros(K)
-    best_traj = None
-    best_cost = np.inf
-    for k in range(K):
-        noise = np.random.randn(N, m) * sig
-        U = noise  # mean zero shooting
-        xs, costs[k] = rollout(x0, U, dt)
-        if costs[k] < best_cost:
-            best_cost = costs[k]
-            best_traj = xs
-    return best_traj, costs
-
-# ---------- Plain MPPI ----------
-def mppi_plain_update(x0, U_init, K=1024, sigma=(0.6, 0.2), dt=0.05, lam=1.0):
-    N = U_init.shape[0]
-    m = U_init.shape[1]
-    sig = np.array(sigma)
-    eps = np.random.randn(K, N, m)
-    costs = np.zeros(K)
-    for k in range(K):
-        noise_seq = eps[k] * sig
-        Uk = U_init + noise_seq
-        _, costs[k] = rollout(x0, Uk, dt)
-    Smin = costs.min()
-    weights = np.exp(-1.0/lam * (costs - Smin))
-    W = weights / np.sum(weights)
-    delta = np.tensordot(W, eps * sig, axes=(0,0))
-    U_new = U_init + delta
-    return U_new, costs
-
-# ---------- Refined MPPI (Eq.18 mapping), using sigma = B B.T ----------
-def mppi_refined_with_diffusion(x0, U_init, K=1024, nu=1.0, dt=0.05, lam=1.0):
-    N, m = U_init.shape
-    r = m  # assume control and noise dimensions equal
-    eps_fd = 1e-6
-    
-    # 1) nominal trajectory
-    xs_nom = [x0.copy()]
-    for k in range(N):
-        xs_nom.append(dynamics(xs_nom[-1], U_init[k], dt, w=None))
-    xs_nom = np.array(xs_nom)
-    
-    # 2) compute G and B
-    G_list, B_list = [], []
-    for k in range(N):
-        xk, uk = xs_nom[k], U_init[k]
-        n = x0.size
-        
-        # G_k = df/du
-        G = np.zeros((n, m))
-        for j in range(m):
-            up = uk.copy(); up[j] += eps_fd
-            G[:, j] = (dynamics(xk, up, dt) - dynamics(xk, uk, dt)) / eps_fd
-        G_list.append(G)
-        
-        # B_k = df/dw
-        B = np.zeros((n, r))
-        for j in range(r):
-            w = np.zeros(r); w[j] += eps_fd
-            B[:, j] = (dynamics(xk, uk, dt, w=w) - dynamics(xk, uk, dt)) / eps_fd
-        B[-1, -1] *= nu
-        B_list.append(B)
-    
-    # 3) sample noise and compute control perturbations
-    mapped_perturbations = np.zeros((K, N, m))
-    costs = np.zeros(K)
-    
-    for k_sample in range(K):
-        xs = [x0.copy()]
-        noise_seq = np.zeros((N, m))
-        for t in range(N):
-            G, B = G_list[t], B_list[t]
-            
-            Sigma = B @ B.T
-            Sigma_inv = np.linalg.inv(Sigma + 1e-8*np.eye(n))  # regularize
-            
-            H = G.T @ Sigma_inv @ G
-            H = 0.5*(H + H.T) + 1e-8*np.eye(m)
-            H_inv = np.linalg.inv(H)
-            
-            eps = np.random.randn(r)
-            eps = np.linalg.cholesky(Sigma + 1e-8*np.eye(n)) @ eps
-            
-            delta_u = H_inv @ (G.T @ Sigma_inv @ B @ eps)
-            noise_seq[t] = delta_u
-            
-            x_next = dynamics(xs[-1], U_init[t] + delta_u, dt, w=B @ eps * np.sqrt(dt))
-            xs.append(x_next)
-        xs = np.array(xs)
-        mapped_perturbations[k_sample] = noise_seq
-        
-        cost = 0.0
-        for t in range(N):
-            cost += running_cost(xs[t], U_init[t] + noise_seq[t]) * dt
-        cost += terminal_cost(xs[-1])
-        costs[k_sample] = cost
-    
-    # 4) MPPI weighted update
-    Smin = costs.min()
-    weights = np.exp(-1.0/lam * (costs - Smin))
-    W = weights / np.sum(weights)
-    delta = np.tensordot(W, mapped_perturbations, axes=(0,0))
-    U_new = U_init + delta
-    return U_new, costs
-
-
-# ---------- Simple iLQR ----------
-def ilqr_solve(x0, U_init, N_iter=8, dt=0.05):
-    U = U_init.copy()
-    N = U.shape[0]
+# --------------------------
+# iLQR
+# --------------------------
+def ilqr(x0, u_init, dt, N, cost_fn, max_iter=50, reg_init=1.0, reg_factor=10.0, tol=1e-4):
+    """
+    Basic iLQR for finite-horizon deterministic dynamics.
+    - x0: initial state
+    - u_init: initial control sequence shape (N, m)
+    - dt: timestep
+    - N: horizon length
+    - cost_fn(x,u) -> scalar (running cost). Terminal cost should be applied after forward pass.
+    Returns optimized control sequence and state trajectory.
+    """
     n = x0.size
-    m = U.shape[1]
-    for it in range(N_iter):
-        xs = [x0.copy()]
-        for k in range(N):
-            xs.append(dynamics(xs[-1], U[k], dt))
-        xs = np.array(xs)
-        
-        Vx = grad_terminal(xs[-1])
-        Vxx = hess_terminal(xs[-1])
-        Ks = np.zeros((N, m, n))
-        ks = np.zeros((N, m))
-        reg = 1e-6
+    Nseq = u_init.shape[0]
+    assert Nseq == N, "u_init must have shape (N, m)"
+    m = u_init.shape[1]
+    u = u_init.copy()
+    reg = reg_init
+
+    def forward_rollout(x0, u_seq):
+        xs = np.zeros((N + 1, n))
+        xs[0] = x0.copy()
+        total = 0.0
+        for t in range(N):
+            total += cost_fn(xs[t], u_seq[t])
+            xs[t + 1] = dynamics(xs[t], u_seq[t], dt, w=None)
+        # optional terminal cost
+        total += cost_fn(xs[N], np.zeros(m))
+        return xs, total
+
+    xs, J = forward_rollout(x0, u)
+    for it in range(max_iter):
+        # compute linearizations along trajectory
+        A_list = []
+        B_list = []
+        for t in range(N):
+            def map_fun(x_, u_):
+                return discrete_dynamics_map(x_, u_, dt)
+            A, Bmat = finite_difference_jacobian(map_fun, xs[t], u[t])
+            A_list.append(A)
+            B_list.append(Bmat)
+
+        # Backward pass (LQ approximation)
+        # Quadratic approx: value at final step
+        V_x = 2 * (xs[N] - xs[0]) @ np.diag([1.0,1.0,0.1,0.1])  # terminal gradient (rough)
+        V_x = V_x.reshape(-1)
+        V_xx = 2 * np.diag([1.0,1.0,0.1,0.1])
+
+        K_seq = np.zeros((N, m, n))
+        k_seq = np.zeros((N, m))
         diverged = False
-        
-        for k in reversed(range(N)):
-            xk, uk = xs[k], U[k]
-            fx, fu = finite_difference_jacobians(xk, uk, dt)
-            lx = grad_running_state(xk, uk) * dt
-            lu = grad_running_control(xk, uk) * dt
-            lxx = hess_running_state(xk, uk) * dt
-            luu = hess_running_control(xk, uk) * dt
-            lux = np.zeros((m, n))
-            Qx = lx + fx.T.dot(Vx)
-            Qu = lu + fu.T.dot(Vx)
-            Qxx = lxx + fx.T.dot(Vxx).dot(fx)
-            Quu = luu + fu.T.dot(Vxx).dot(fu)
-            Qux = lux + fu.T.dot(Vxx).dot(fx)
-            Quu_reg = Quu + reg*np.eye(m)
+
+        for t in reversed(range(N)):
+            A = A_list[t]
+            Bmat = B_list[t]
+            # cost derivatives (quadratic)
+            # l = q(x,u)
+            Q_x = 2 * (xs[t] - xs[0]) @ np.diag([1.0,1.0,0.1,0.1])
+            Q_x = Q_x.reshape(-1)
+            Q_u = (u[t] * 0.1)  # derivative of 0.5 u^T R u with R diag(0.1,0.1)
+            Q_xx = 2 * np.diag([1.0,1.0,0.1,0.1])
+            Q_ux = np.zeros((m, n))
+            Q_uu = np.diag([0.1, 0.1]) + reg * np.eye(m)
+
+            # Q function expansions
+            # Here we do a simple LQ expansion: quu = Q_uu + B^T V_xx B
+            qu = Q_u + Bmat.T @ V_x
+            qx = Q_x + A.T @ V_x
+            quu = Q_uu + Bmat.T @ V_xx @ Bmat
+            qxx = Q_xx + A.T @ V_xx @ A
+            qux = Q_ux + Bmat.T @ V_xx @ A
+
+            # regularize
             try:
-                inv_Quu = np.linalg.inv(Quu_reg)
+                Luu = np.linalg.cholesky(quu)
+                inv_quu = np.linalg.inv(quu)
             except np.linalg.LinAlgError:
                 diverged = True
                 break
-            Ks[k] = -inv_Quu @ Qux
-            ks[k] = -inv_Quu @ Qu
-            Vx = Qx + Ks[k].T.dot(Quu).dot(ks[k]) + Ks[k].T.dot(Qu) + Qux.T.dot(ks[k])
-            Vxx = Qxx + Ks[k].T.dot(Quu).dot(Ks[k]) + Ks[k].T.dot(Qux) + Qux.T.dot(Ks[k])
-            Vxx = 0.5*(Vxx + Vxx.T)
+
+            k = -inv_quu @ qu
+            K = -inv_quu @ qux
+            # update value function
+            V_x = qx + K.T @ quu @ k + K.T @ qu + qux.T @ k
+            V_xx = qxx + K.T @ quu @ K + K.T @ qux + qux.T @ K
+            # ensure symmetry
+            V_xx = 0.5 * (V_xx + V_xx.T)
+            K_seq[t] = K
+            k_seq[t] = k
+
         if diverged:
-            reg *= 10
-            continue
-        
-        alpha = 1.0
-        success = False
-        cost_old = rollout(x0, U, dt)[1]
-        for _ in range(5):
-            Xnew = [x0.copy()]
-            Unew = []
-            for k in range(N):
-                du = alpha * ks[k] + Ks[k].dot(Xnew[-1]-xs[k])
-                u_try = U[k] + du
-                Unew.append(u_try)
-                Xnew.append(dynamics(Xnew[-1], u_try, dt))
-            Unew = np.array(Unew)
-            cost_new = rollout(x0, Unew, dt)[1]
-            if cost_new < cost_old:
-                U = Unew
-                success = True
+            reg *= reg_factor
+            if reg > 1e6:
                 break
-            alpha *= 0.5
-        if not success:
-            reg *= 10
-    return U
+            continue
 
-# ---------- helpers: numerical gradients/hessians ----------
-def grad_running_state(x, u, eps=1e-5):
-    n = x.size
-    g = np.zeros(n)
-    f0 = running_cost(x, u)
-    for i in range(n):
-        xp = x.copy(); xp[i] += eps
-        g[i] = (running_cost(xp, u) - f0) / eps
-    return g
+        # line search / forward pass
+        alpha = 1.0
+        accepted = False
+        for _ in range(10):
+            xu = np.zeros_like(u)
+            xnew = np.zeros((N + 1, n))
+            xnew[0] = x0.copy()
+            for t in range(N):
+                du = alpha * k_seq[t] + K_seq[t] @ (xnew[t] - xs[t])
+                xu[t] = u[t] + du
+                xnew[t + 1] = dynamics(xnew[t], xu[t], dt, w=None)
+            _, Jnew = forward_rollout(x0, xu)
+            if Jnew < J:
+                u = xu
+                xs = xnew
+                J = Jnew
+                accepted = True
+                reg = max(reg / reg_factor, 1e-6)
+                break
+            else:
+                alpha *= 0.5
 
-def grad_running_control(x, u, eps=1e-5):
-    m = u.size
-    g = np.zeros(m)
-    f0 = running_cost(x, u)
-    for i in range(m):
-        up = u.copy(); up[i] += eps
-        g[i] = (running_cost(x, up) - f0) / eps
-    return g
+        if not accepted:
+            reg *= reg_factor
 
-def hess_running_state(x, u, eps=1e-4):
-    n = x.size
-    H = np.zeros((n, n))
-    for i in range(n):
-        for j in range(n):
-            ei = np.zeros(n); ej = np.zeros(n)
-            ei[i] = eps; ej[j] = eps
-            fpp = running_cost(x+ei+ej, u)
-            fpm = running_cost(x+ei-ej, u)
-            fmp = running_cost(x-ei+ej, u)
-            fmm = running_cost(x-ei-ej, u)
-            H[i,j] = (fpp - fpm - fmp + fmm) / (4*eps*eps)
-    return H
-
-def hess_running_control(x, u, eps=1e-4):
-    m = u.size
-    H = np.zeros((m,m))
-    for i in range(m):
-        for j in range(m):
-            ei = np.zeros(m); ej = np.zeros(m)
-            ei[i] = eps; ej[j] = eps
-            fpp = running_cost(x, u+ei+ej)
-            fpm = running_cost(x, u+ei-ej)
-            fmp = running_cost(x, u-ei+ej)
-            fmm = running_cost(x, u-ei-ej)
-            H[i,j] = (fpp - fpm - fmp + fmm) / (4*eps*eps)
-    return H
-
-def grad_terminal(x, eps=1e-5):
-    n = x.size
-    g = np.zeros(n)
-    f0 = terminal_cost(x)
-    for i in range(n):
-        xp = x.copy(); xp[i] += eps
-        g[i] = (terminal_cost(xp) - f0) / eps
-    return g
-
-def hess_terminal(x, eps=1e-4):
-    n = x.size
-    H = np.zeros((n,n))
-    for i in range(n):
-        for j in range(n):
-            ei = np.zeros(n); ej = np.zeros(n)
-            ei[i] = eps; ej[j] = eps
-            fpp = terminal_cost(x+ei+ej)
-            fpm = terminal_cost(x+ei-ej)
-            fmp = terminal_cost(x-ei+ej)
-            fmm = terminal_cost(x-ei-ej)
-            H[i,j] = (fpp - fpm - fmp + fmm) / (4*eps*eps)
-    return H
-
-# ---------- MPC runner ----------
-def run_mpc_planner(planner_update_fn, planner_name, x0, Tsim=3.0, dt=0.05, N=40, **kwargs):
-    t = 0.0
-    x = x0.copy()
-    traj = [x.copy()]
-    U = np.zeros((N,2)); U[:,0] = 1.0
-    steps = int(np.ceil(Tsim / dt))
-    costs = []
-    for step in range(steps):
-        U, info = planner_update_fn(x, U, **kwargs)
-        u0 = U[0].copy()
-        x = dynamics(x, u0, dt)
-        traj.append(x.copy())
-        U = np.vstack([U[1:], np.zeros((1,2))])
-        costs.append(running_cost(x, u0))
-        if np.linalg.norm(x[:2]-goal) < 0.2:
+        if np.abs(J - Jnew) < tol:
             break
-    traj = np.array(traj)
-    print(f'MPC {planner_name}: executed {len(traj)-1} steps, final pos {traj[-1,:2]}, total cost {np.sum(costs):.3f}')
-    return traj
 
-# wrapper planners
-def planner_plain_mppi(x, U_init, **kwargs):
-    U_new, costs = mppi_plain_update(x, U_init, **kwargs)
-    return U_new, {'costs': costs}
+    return xs, u, J
 
-def planner_refined_mppi(x, U_init, **kwargs):
-    U_new, costs = mppi_refined_with_diffusion(x, U_init, **kwargs)
-    return U_new, {'costs': costs}
+# --------------------------
+# BaseMPPI
+# --------------------------
+def base_mppi(x0, u_nominal, dt, N, K, cost_fn, lambda_=1.0, sigma=1.0, u_min=None, u_max=None):
+    """
+    Classic PI-MPC:
+    - x0: initial state
+    - u_nominal: initial nominal control sequence shape (N, m)
+    - K: number of rollouts (samples)
+    - sigma: stddev of additive exploration on u (scalar or array)
+    - lambda_: temperature parameter
+    Returns: updated u_nominal, and optionally trajectory
+    """
+    Nseq, m = u_nominal.shape
+    assert Nseq == N
+    # Pre-sample all perturbations: shape (K, N, m)
+    delta_u = np.random.randn(K, N, m) * (sigma if np.isscalar(sigma) else np.array(sigma).reshape(1,1,-1))
+    costs = np.zeros(K)
+    trajectories = np.zeros((K, N+1, x0.size))
 
-def planner_ilqr(x, U_init, **kwargs):
-    U_new = ilqr_solve(x, U_init, **kwargs)
-    return U_new, {}
+    for k in range(K):
+        x = x0.copy()
+        trajectories[k, 0] = x
+        total_cost = 0.0
+        for t in range(N):
+            u_try = u_nominal[t] + delta_u[k, t]
+            # Clip if requested
+            if u_min is not None:
+                u_try = np.maximum(u_try, u_min)
+            if u_max is not None:
+                u_try = np.minimum(u_try, u_max)
+            total_cost += cost_fn(x, u_try)
+            # treat delta_u as resulting from action noise, but here we sample on control
+            # Implement dynamics with optional control noise set to zero
+            x = dynamics(x, u_try, dt, w=None)
+            trajectories[k, t+1] = x
+        # terminal cost
+        total_cost += cost_fn(x, np.zeros(m))
+        costs[k] = total_cost
 
-# ---------- demo ----------
-def run_full_demo():
-    dt = 0.05; N = 40
-    x0 = np.array([0.0, 0.0, 0.0, 0.5])
+    # compute weights
+    costs_min = np.min(costs)
+    expw = np.exp(-(costs - costs_min) / lambda_)  # subtract min for numerical stability
+    weights = expw / (np.sum(expw) + 1e-12)
 
-    # print('Running shooting baseline...')
-    # X_shoot, _ = random_shooting(x0, N, K=512, sigma=(0.8,0.3), dt=dt)
+    # update nominal control by weighted average of perturbations
+    weighted_d = np.tensordot(weights, delta_u, axes=(0,0))  # shape (N,m)
+    u_new = u_nominal + weighted_d
 
-    # print('Running MPC with Plain MPPI...')
-    # traj_plain = run_mpc_planner(planner_plain_mppi, 'Plain MPPI', x0, Tsim=4.0, dt=dt, N=N, K=512, sigma=(0.6,0.2), lam=1.0)
+    return u_new, trajectories, costs, weights
 
-    print('Running MPC with Refined MPPI...')
-    traj_refined = run_mpc_planner(planner_refined_mppi, 'Refined MPPI', x0, Tsim=4.0, dt=dt, N=N, K=512, nu=5.0, lam=1.0)
+# --------------------------
+# RefinedMPPI (paper-style)
+# --------------------------
+def refined_mppi(x0,
+                 u_nom,
+                 dt,
+                 N,
+                 K,
+                 cost_fn,
+                 lambda_=1.0,
+                 nu=1.0,
+                 sigma_epsilon=1.0,
+                 R=None):
+    """
+    Refined MPPI with likelihood-ratio corrected running cost (Eq. (31) in the paper).
 
-    print('Running MPC with iLQR baseline...')
-    traj_ilqr = run_mpc_planner(planner_ilqr, 'iLQR', x0, Tsim=4.0, dt=dt, N=N, N_iter=6)
+    Parameters
+    ----------
+    x0 : (n,) array
+        initial state
+    u_nom : (N, m) array
+        nominal control sequence
+    dt : float
+        timestep
+    N : int
+        horizon length (u_nom.shape[0] must equal N)
+    K : int
+        number of sampled trajectories
+    cost_fn : callable (x, u) -> scalar
+        base running cost q(x,u) (does not include control quadratic unless you want it in q)
+    lambda_ : float
+        temperature / weight param (paper uses λ)
+    nu : float >= 1.0
+        exploration variance multiplier used in sampling BE (nu >= 1)
+    sigma_epsilon : float
+        stddev for sampled epsilons (standard normal scaled)
+    R : (m,m) array or None
+        control cost matrix used in the 1/2 u^T R u term in q̃. If None, uses identity*0.1
 
-    plt.figure(figsize=(10,6))
-    if X_shoot is not None:
-        plt.plot(X_shoot[:,0], X_shoot[:,1], '--', label='Shooting baseline')
-    plt.plot(traj_plain[:,0], traj_plain[:,1], label='Plain MPPI')
-    plt.plot(traj_refined[:,0], traj_refined[:,1], label='Refined MPPI')
-    plt.plot(traj_ilqr[:,0], traj_ilqr[:,1], label='iLQR')
-    plt.scatter([goal[0]],[goal[1]], marker='*', s=150, label='goal')
-    plt.legend()
-    plt.xlabel('x'); plt.ylabel('y'); plt.axis('equal'); plt.title('Closed-loop MPC trajectories')
-    plt.grid(True)
+    Returns
+    -------
+    u_new : (N,m) array
+        updated nominal control sequence
+    x_trajectories : (K, N+1, n) array
+        sampled trajectories
+    costs : (K,) array
+        S_tilde (full cost-to-go) for each sampled traj (used for diagnostics)
+    weights : (K,) array
+        normalized importance weights
+    """
+    n = x0.size
+    m = u_nom.shape[1]
+    assert u_nom.shape[0] == N
+
+    if R is None:
+        R = np.diag([0.1] * m)
+
+    # r = number of noise channels (B returns n x r)
+    r = B(x0).shape[1]
+
+    # Pre-sample epsilons: shape (K, N, r), standard normal scaled by sigma_epsilon
+    eps = np.random.randn(K, N, r) * sigma_epsilon
+
+    # Storage
+    x_trajs = np.zeros((K, N + 1, n))
+    S_tilde = np.zeros(K)  # total modified cost-to-go for each sample
+
+    # Sampling rollouts under q_{nu, u}
+    for k in range(K):
+        x = x0.copy()
+        x_trajs[k, 0] = x
+        total = 0.0
+        for t in range(N):
+            u_t = u_nom[t]  # center control for sampling
+            bmat = B(x)     # (n, r)
+            gmat = G(x)     # (n, m)
+
+            # sampling noise for this sample/time
+            eps_k_t = eps[k, t]  # (r,)
+
+            # scale noise for exploration: BE = scale * B (paper uses nu on Bc) 
+            # # we implement BE*eps*sqrt(dt) = B * (sqrt(nu)*eps) * sqrt(dt) 
+            noise_state = bmat @ (np.sqrt(nu) * eps_k_t) * np.sqrt(dt)
+            
+
+            # compute modified running cost q̃ (Eq. (31))
+            # base cost q(x,u)
+            q_base = cost_fn(x, u_t)
+
+            # 1) control quadratic term: 0.5 u^T R u
+            term_ctrl_quad = 0.5 * float(u_t.T @ R @ u_t)
+
+            # 2) lambda * u^T G(...) ε sqrt(dt) -- use a general consistent form:
+            #    interpret the paper's G ε as the projection of state-noise along control directions.
+            #    A robust, dimensionally-correct term is:
+            #       lambda * u^T [ G^T Sigma^{-1} B eps ] * sqrt(dt)
+            #    where Sigma = B B^T (state-noise covariance).
+            Sigma = bmat @ bmat.T  # (n, n)
+            # pseudo-inverse for stability
+            Sigma_inv = np.linalg.pinv(Sigma + 1e-9 * np.eye(n))
+            beps = bmat @ eps_k_t  # (n,)
+            # compute the scalar cross term
+            cross_vec = gmat.T @ (Sigma_inv @ beps)  # (m,)
+            term_cross = float(lambda_ * (u_t @ cross_vec) * np.sqrt(dt))
+
+            # 3) exploration penalty: 0.5 * lambda * (1 - nu^{-1}) * (beps^T * (BcB_c^T)^{-1} * beps) * dt
+            #    in the general case we use Sigma_inv above: (beps^T Sigma_inv beps) scaled by dt
+            term_expl = 0.5 * lambda_ * (1.0 - 1.0 / float(nu)) * (float(beps.T @ (Sigma_inv @ beps)) * dt)
+
+            # combined modified running cost (q̃)
+            q_tilde = q_base + term_ctrl_quad + term_cross + term_expl
+
+            # accumulate S_tilde (sum q̃ * dt)
+            total += q_tilde * dt
+
+            # step dynamics with the sampled noise_state
+            # equivalent to: x = x + (f(x)+G(x)u) * dt + B(x) * (sqrt(nu)*eps) * sqrt(dt)
+            x = x + (f(x) + gmat @ u_t) * dt + noise_state
+            x_trajs[k, t + 1] = x
+
+        # terminal cost: add phi(x_T) if desired. Here we'll reuse cost_fn at final state with zero u.
+        terminal_cost = cost_fn(x, np.zeros(m))
+        total += terminal_cost  # terminal cost not multiplied by dt in paper's notation (they add φ separately)
+        S_tilde[k] = total
+
+    # Importance weights
+    # stable exponent: subtract min before exponent
+    minS = np.min(S_tilde)
+    expw = np.exp(-(S_tilde - minS) / lambda_)
+    weights = expw / (np.sum(expw) + 1e-12)
+
+    # Compute update for u using the paper's structure:
+    # u_new_j = u_nom_j + H^{-1} G * E_qnu[ weight * ( eps_j / sqrt(dt) ) ]  (discrete approx)
+    # We'll compute a practical version:
+    u_update = np.zeros_like(u_nom)  # (N, m)
+    for t in range(N):
+        # approximate local matrices at nominal (or mean sampled) state
+        x_nom_est = np.mean(x_trajs[:, t], axis=0)
+        Gmat = G(x_nom_est)     # (n, m)
+        Bmat = B(x_nom_est)     # (n, r)
+        Sigma_loc = Bmat @ Bmat.T
+        Sigma_inv_loc = np.linalg.pinv(Sigma_loc + 1e-9 * np.eye(n))
+
+        # H = G^T Sigma^{-1} G  (m x m)
+        H = Gmat.T @ Sigma_inv_loc @ Gmat
+        # regularize H for inversion stability
+        H_reg = H + 1e-6 * np.eye(m)
+        H_inv = np.linalg.pinv(H_reg)
+
+        # accumulate numerator: E[ weight * ( G^T Sigma^{-1} B eps ) ]
+        numer = np.zeros(m)
+        for k in range(K):
+            eps_k_t = eps[k, t]
+            beps = Bmat @ eps_k_t
+            term = Gmat.T @ (Sigma_inv_loc @ beps)  # (m,)
+            numer += weights[k] * term
+
+        # the paper's discrete formula yields a 1/sqrt(dt) factor when mapping eps -> control correction
+        delta_u = H_inv @ numer / np.sqrt(dt)
+        u_update[t] = delta_u
+
+    u_new = u_nom + u_update
+    return u_new, x_trajs, S_tilde, weights
+
+# --------------------------
+# Example usage (small demo)
+# --------------------------
+# if __name__ == "__main__":
+#     np.random.seed(0)
+#     dt = 0.05
+#     N = 30
+#     x0 = np.array([0.0, 0.0, 0.0, 0.0])
+#     x_goal = np.array([5.0, 0.0, 0.0, 0.0])
+
+#     m = 2
+#     u0 = np.zeros((N, m))
+
+#     def cost_wrapper(x, u):
+#         # small running cost to get to px ~ x_goal[0]
+#         Q = np.diag([1.0, 1.0, 0.2, 0.1])
+#         R = np.diag([0.05, 0.05])
+#         dx = x - x_goal
+#         return float(dx.T @ Q @ dx + 0.5 * u.T @ R @ u)
+
+#     # iLQR run
+#     print("Running iLQR (this may take a few seconds)...")
+#     xs, u_opt, J = ilqr(x0, u0.copy(), dt, N, cost_wrapper, max_iter=25)
+#     print("iLQR returned cost J =", J)
+
+#     # Base MPPI
+#     print("Running BaseMPPI...")
+#     u_nom = u0.copy()
+#     u_nom, trajs, costs, w = base_mppi(x0, u_nom, dt, N, K=256, cost_fn=cost_wrapper, lambda_=1.0, sigma=0.5)
+#     print("BaseMPPI: mean cost across samples:", np.mean(costs))
+
+#     # Refined MPPI
+#     print("Running RefinedMPPI...")
+#     u_nom2 = u0.copy()
+#     u_nom2, trajs2, costs2, w2 = refined_mppi(x0, u_nom2, dt, N, K=256, cost_fn=cost_wrapper, lambda_=1.0, nu=1.0)
+#     print("RefinedMPPI: mean cost across samples:", np.mean(costs2))
+
+#     print("Done.")
+
+
+# -------------------------
+# MPC wrapper
+# -------------------------
+def run_mpc(x0,
+            x_goal,
+            planner='RefinedMPPI',   # 'iLQR', 'BaseMPPI', or 'RefinedMPPI'
+            T=6.0,
+            dt=0.05,
+            K_samples=256,
+            display=False):
+    np.random.seed(1)
+    n = x0.size
+    m = 2
+    N = int(np.round(T / dt))
+    u_nom = np.zeros((N, m))
+    cost_fn = make_quadratic_cost(x_goal)
+
+    max_steps = 200  # safety
+    x = x0.copy()
+    trajectory = [x.copy()]
+    total_steps = 0
+
+    for step in range(max_steps):
+        total_steps += 1
+        # Plan over horizon starting from current x
+        if planner == 'iLQR':
+            xs, u_opt, J = ilqr(x, u_nom.copy(), dt, N, cost_fn, max_iter=20)
+            u_seq = u_opt
+        elif planner == 'BaseMPPI':
+            u_seq, _, _, _ = base_mppi(x, u_nom.copy(), dt, N, K_samples, cost_fn, lambda_=1.0, sigma=0.5)
+        elif planner == 'RefinedMPPI':
+            u_seq, _, _, _ = refined_mppi(x, u_nom.copy(), dt, N, K_samples, cost_fn, lambda_=1.0, nu=1, sigma_epsilon=1.0)
+        else:
+            raise ValueError("Unknown planner")
+
+        # apply first control (no process noise here; you can add noise if desired)
+        u_apply = u_seq[0]
+        x = dynamics(x, u_apply, dt, w=None)  # w=None => deterministic step
+        trajectory.append(x.copy())
+
+        # shift u_seq for warm start: drop first, append last-initialized zero
+        u_nom = np.vstack([u_seq[1:], np.zeros((1, m))])
+
+        # termination condition: distance to goal small
+        if np.linalg.norm(x[:2] - x_goal[:2]) < 0.2 and abs(x[3] - x_goal[3]) < 0.5:
+            print(f"[MPC] Reached goal at step {step}, state {x}")
+            break
+
+        if step % 10 == 0:
+            # print diagnostics
+            dpos = np.linalg.norm(x[:2] - x_goal[:2])
+            print(f"[MPC] step {step:3d} pos {x[0]:.3f},{x[1]:.3f} v {x[3]:.3f} dist {dpos:.3f}")
+
+    return np.array(trajectory)
+
+# -------------------------
+# Example run
+# -------------------------
+if __name__ == "__main__":
+    start = np.array([0.0, 0.0, 0.0, 0.0])
+    goal = np.array([6.0, 0.0, 0.0, 0.0])
+
+    # Run each planner
+    print("Running closed-loop MPC with iLQR...")
+    traj_ilqr = run_mpc(start, goal, planner='iLQR', T=3.0, dt=0.05, K_samples=128)
+    print("Running closed-loop MPC with BaseMPPI...")
+    traj_base = run_mpc(start, goal, planner='BaseMPPI', T=3.0, dt=0.05, K_samples=128)
+    print("Running closed-loop MPC with RefinedMPPI...")
+    traj_refined = run_mpc(start, goal, planner='RefinedMPPI', T=3.0, dt=0.05, K_samples=128)
+
+    # --- Plot static trajectories ---
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots()
+    ax.plot(traj_ilqr[:,0], traj_ilqr[:,1], 'b-', label='iLQR')
+    ax.plot(traj_base[:,0], traj_base[:,1], 'g-', label='BaseMPPI')
+    ax.plot(traj_refined[:,0], traj_refined[:,1], 'm-', label='RefinedMPPI')
+    ax.plot(goal[0], goal[1], 'rx', markersize=12, label='Goal')
+    ax.set_title("Closed-loop MPC trajectories")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.legend()
+    ax.axis('equal')
     plt.show()
 
-if __name__ == '__main__':
-    run_full_demo()
+    # --- Animate trajectories ---
+    import matplotlib.animation as animation
+    fig2, ax2 = plt.subplots()
+    ax2.set_xlim(-1, 7); ax2.set_ylim(-3, 3)
+    ax2.set_aspect('equal')
+    ax2.plot(goal[0], goal[1], 'rx', markersize=12, label='Goal')
+    lines = {
+        "iLQR": ax2.plot([], [], 'b-', label='iLQR')[0],
+        "BaseMPPI": ax2.plot([], [], 'g-', label='BaseMPPI')[0],
+        "RefinedMPPI": ax2.plot([], [], 'm-', label='RefinedMPPI')[0],
+    }
+    ax2.legend()
+
+    maxlen = max(len(traj_ilqr), len(traj_base), len(traj_refined))
+    trajs = {"iLQR": traj_ilqr, "BaseMPPI": traj_base, "RefinedMPPI": traj_refined}
+
+    def animate(i):
+        for name, traj in trajs.items():
+            if i < len(traj):
+                lines[name].set_data(traj[:i+1,0], traj[:i+1,1])
+        return list(lines.values())
+
+    ani = animation.FuncAnimation(fig2, animate, frames=maxlen, interval=150, blit=True)
+    plt.show()
