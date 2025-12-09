@@ -1,0 +1,6 @@
+_target_: drone.models.discrete_action_model.DiscreteActionModel
+pretrained: false
+action_dim: 4
+num_bins: 11
+action_low: -1.0
+action_high: 1.0

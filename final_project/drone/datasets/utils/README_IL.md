@@ -1,0 +1,339 @@
+# Crazyflie Imitation Learning Data Collection Pipeline
+
+A complete pipeline for collecting synchronized state-action-observation data from a Crazyflie 2.X drone for training imitation learning policies for obstacle avoidance.
+
+## 📋 Table of Contents
+
+- [Overview](#overview)
+- [Pipeline Components](#pipeline-components)
+- [Data Format](#data-format)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Data Analysis](#data-analysis)
+- [Training](#training)
+
+## 🎯 Overview
+
+This pipeline enables you to:
+1. **Collect** synchronized camera images, drone states, and actions via keyboard control
+2. **Analyze** collected data quality and statistics
+3. **Load** data into PyTorch for training imitation learning policies
+
+The goal is to train a neural network policy that can perform obstacle avoidance by learning from human demonstrations.
+
+## 🔧 Pipeline Components
+
+### 1. Data Collection (`keyboard_control_IL.py`)
+
+**Purpose:** Fly the Crazyflie drone with keyboard controls while recording synchronized data.
+
+**Features:**
+- Real-time keyboard control of the drone
+- Manual recording start/stop (press 'r' to start, 'x' to stop)
+- Synchronized data collection at configurable rate (default: 20 Hz)
+- Automatic trial numbering and data organization
+- 3-second PID stabilization after takeoff before allowing recording
+
+**Controls:**
+```
+u     - Take off
+r     - START recording
+x     - STOP recording  
+w/s   - Forward/Backward
+a/d   - Left/Right
+space - Up
+c     - Down
+q/e   - Turn left/Right
+l     - Land and exit
+```
+
+### 2. Data Analysis (`analyze_il_data.py`)
+
+**Purpose:** Validate and analyze collected data quality.
+
+**Generates:**
+- Data validation reports
+- State and action distribution statistics
+- 3D trajectory visualizations
+- Action time-series plots
+- Image sample previews
+- Training readiness assessment
+
+### 3. PyTorch DataLoader (`dataloader.py`)
+
+**Purpose:** Load data into PyTorch for training neural networks.
+
+**Features:**
+- Loads synchronized triplets: (observation, state, action)
+- Image preprocessing and augmentation
+- Optional state/action normalization
+- Train/val splitting
+- Efficient batched data loading
+
+### 4. Testing Suite (`test_dataloader.py`)
+
+**Purpose:** Validate that the dataloader works correctly.
+
+**Tests:**
+- Dataset loading
+- Shape validation
+- Batch loading
+- Data range checking
+- Visualization generation
+
+## 📊 Data Format
+
+### State Vector (9 dimensions)
+
+The **state** represents the drone's position, velocity, and orientation at each timestep:
+
+| Index | Variable | Description | Units | Typical Range |
+|-------|----------|-------------|-------|---------------|
+| 0 | `x` | Position in X (forward/backward) | meters | -2.0 to 2.0 |
+| 1 | `y` | Position in Y (left/right) | meters | -2.0 to 2.0 |
+| 2 | `z` | Height above ground | meters | 0.2 to 0.5 |
+| 3 | `vx` | Velocity in X | m/s | -0.3 to 0.3 |
+| 4 | `vy` | Velocity in Y | m/s | -0.3 to 0.3 |
+| 5 | `vz` | Velocity in Z (vertical) | m/s | -0.1 to 0.1 |
+| 6 | `roll` | Roll angle | degrees | -5 to 5 |
+| 7 | `pitch` | Pitch angle | degrees | -5 to 5 |
+| 8 | `yaw` | Yaw angle (heading) | degrees | -180 to 180 |
+
+**Coordinate Frame:** Body frame (relative to drone's orientation)
+- **X-axis:** Forward (nose direction)
+- **Y-axis:** Left (left wing direction)
+- **Z-axis:** Up (vertical)
+
+### Action Vector (4 dimensions)
+
+The **action** represents the velocity commands sent to the drone:
+
+| Index | Variable | Description | Units | Typical Range |
+|-------|----------|-------------|-------|---------------|
+| 0 | `vx` | Forward/backward velocity command | m/s | -0.2 to 0.2 |
+| 1 | `vy` | Left/right velocity command | m/s | -0.2 to 0.2 |
+| 2 | `vz` | Up/down velocity command | m/s | -0.2 to 0.2 |
+| 3 | `yaw_rate` | Yaw rotation rate command | deg/s | -45 to 45 |
+
+**Action Space:** Continuous velocity commands in body frame
+- Actions are sent to the Crazyflie's `MotionCommander.start_linear_motion()` API
+- The drone's onboard controller tracks these velocity setpoints
+- For obstacle avoidance at constant height, `vz` is typically 0
+
+### Observation
+
+The **observation** is a camera image from the drone's perspective:
+
+| Property | Value |
+|----------|-------|
+| Format | RGB image |
+| Resolution | 640×480 pixels (raw) |
+| Processed Size | 224×224 pixels (for neural network input) |
+| Normalization | [-1, 1] (after preprocessing) |
+| File Format | JPEG |
+
+### Data Structure
+
+Each trial is stored in `imitation_data/trial_XX/`:
+
+```
+trial_01/
+├── images/                      # Camera images
+│   ├── frame_000000.jpg
+│   ├── frame_000001.jpg
+│   └── ...
+├── data_log.json               # Synchronized state-action-observation data
+├── metadata.json               # Trial metadata
+├── trajectory_analysis.png     # Generated by analyze_il_data.py
+├── action_analysis.png         # Generated by analyze_il_data.py
+└── analysis_report.json        # Generated by analyze_il_data.py
+```
+
+**data_log.json format:**
+```json
+[
+  {
+    "timestep": 0,
+    "timestamp": 0.0,
+    "image_path": "images/frame_000000.jpg",
+    "state": {
+      "x": 0.0,
+      "y": 0.0,
+      "z": 0.3,
+      "vx": 0.0,
+      "vy": 0.0,
+      "vz": 0.0,
+      "roll": 0.0,
+      "pitch": 0.0,
+      "yaw": 0.0
+    },
+    "action": [0.0, 0.0, 0.0, 0.0]
+  },
+  ...
+]
+```
+
+## 🚀 Installation
+
+### Prerequisites
+- Python 3.8+
+- Crazyflie 2.X drone with Lighthouse positioning system
+- USB camera (index 1 by default)
+- Windows/Linux/Mac
+
+### Install Dependencies
+Refer to installation guide in [README](../../../README.md)
+
+### Configuration
+
+Edit `keyboard_control_IL.py`:
+
+```python
+# Configuration
+group_number = 80              # Your Crazyflie radio group number
+URI = f'radio://0/{group_number}/2M'
+camera_index = 1               # USB camera index (0, 1, 2, ...)
+CONTROL_RATE_HZ = 20          # Data collection rate (10-30 Hz recommended)
+NUM_TRIALS = 50 # May need to update, but 50 is a good start
+```
+
+## 📖 Usage
+
+### Step 1: Collect Data
+
+```bash
+python keyboard_control_IL.py
+```
+
+**Workflow:**
+1. Enter trial number (1-50)
+2. Wait for drone connection
+3. Press `u` to take off
+4. Wait 3 seconds for PID stabilization
+5. Press `r` to START recording
+6. Fly around obstacles using keyboard controls
+7. Press `x` to STOP recording
+8. Press `l` to land
+9. Data is automatically saved
+
+**Tips for good data:**
+- Collect 30-75 diverse trials
+- Vary obstacle configurations and approach angles
+- Include near-misses but avoid crashes
+- Fly smoothly and deliberately
+- Keep height relatively constant for obstacle avoidance
+
+### Step 2: Analyze Data
+
+```bash
+# Analyze a specific trial
+python analyze_il_data.py imitation_data/trial_01
+
+# Analyze all trials
+python analyze_il_data.py
+```
+
+**What to look for:**
+- ✓ At least 200+ timesteps per trial
+- ✓ Good action diversity (not all zeros)
+- ✓ Smooth trajectories
+- ✓ No missing images or temporal gaps
+
+### Step 3: Test DataLoader
+
+```bash
+python test_dataloader.py
+```
+
+This validates that data can be loaded correctly for training.
+
+### Step 4: Train IL Policy
+See Model README.md
+
+## ⚙️ Configuration
+
+### Adjusting Collection Rate
+
+Edit `CONTROL_RATE_HZ` in `keyboard_control_with_logging_FIXED.py`:
+
+```python
+CONTROL_RATE_HZ = 20  # Recommended: 20 Hz
+```
+
+This synchronizes:
+- Control loop frequency (how often commands are sent)
+- State logging frequency (how often states are received)
+- Data collection frequency (how often samples are saved)
+
+**Recommendations:**
+- **10 Hz**: Minimum for slow flight (< 0.3 m/s)
+- **20 Hz**: Recommended for most use cases
+- **30 Hz**: For fast, reactive flight
+
+### Adjusting Flight Speed
+
+Edit the `velocity` parameter in `KeyboardDroneWithLogging.__init__()`:
+
+```python
+self.velocity = 0.2  # m/s (default)
+```
+
+**Recommendations:**
+- **0.1-0.2 m/s**: Safe for learning, collecting data
+- **0.3-0.5 m/s**: More challenging obstacle avoidance
+
+## 📈 Data Analysis
+
+### Metrics Computed
+
+**State Statistics:**
+- Position range and variation
+- Velocity distributions
+- Orientation (roll, pitch, yaw) statistics
+
+**Action Statistics:**
+- Action range and diversity
+- Non-zero action ratios
+- Command distributions
+
+**Data Quality:**
+- Temporal consistency (gaps detection)
+- Missing images
+- Sample count
+
+### Training Readiness Criteria
+
+Your data is ready for training if:
+- ✓ At least 100 timesteps per trial (300+ recommended)
+- ✓ At least 5-10 trials for train/val split
+- ✓ Good action diversity (< 70% zero actions)
+- ✓ No major data quality issues
+
+
+## 🐛 Troubleshooting
+
+### Drone doesn't take off
+- Check `group_number` matches your drone
+- Ensure drone has fresh batteries
+
+### Camera not found
+- Adjust `camera_index` (try 0, 1, 2)
+- Verify camera is connected: `cv2.VideoCapture(1).isOpened()`
+
+### Data not saving
+- Check that recording was started with 'r'
+- Verify sufficient disk space
+- Check console output for errors
+- Frequently restart drone and cfclient in-between battery switches
+
+### Low data collection rate
+- Increase `CONTROL_RATE_HZ` carefully
+- Check if camera capture is bottleneck
+- Ensure sufficient CPU resources
+
+### Train/val split error
+- Collect at least 2 trials
+- Check that trials have data_log.json files
+
+**Happy flying! 🚁**

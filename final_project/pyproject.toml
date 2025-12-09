@@ -1,0 +1,19 @@
+[project]
+name = "drone"
+version = "0.1.1"
+requires-python = ">=3.10,<3.14"
+
+dependencies = [
+    "torch",
+    "torchvision",
+    "opencv-python",
+    "ipykernel",
+    "matplotlib",
+    "cflib",
+    "pynput",
+    "omegaconf",
+    "hydra-core",
+]
+
+[tool.setuptools.packages.find]
+include = ["drone*"]

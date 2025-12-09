@@ -1,0 +1,3 @@
+_target_: drone.models.continuous_action_model.ContinuousActionModel
+pretrained: false
+action_dim: 4

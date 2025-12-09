@@ -1,0 +1,29 @@
+{
+  "session_name": "trial_01",
+  "trial_number": 1,
+  "total_timesteps": 397,
+  "duration": 25.278343677520752,
+  "collection_rate_hz": 20.0,
+  "camera_resolution": [
+    640,
+    480
+  ],
+  "state_variables": [
+    "x",
+    "y",
+    "z",
+    "vx",
+    "vy",
+    "vz",
+    "roll",
+    "pitch",
+    "yaw"
+  ],
+  "action_format": [
+    "vx",
+    "vy",
+    "vz",
+    "yaw_rate"
+  ],
+  "data_format": "Each entry contains synchronized state, action, and observation (image) at a fixed timestep"
+}

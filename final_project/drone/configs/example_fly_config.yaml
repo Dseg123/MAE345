@@ -1,0 +1,21 @@
+defaults:
+  - models: discrete_action_model
+  # - models: continuous_action_model
+
+# Model configuration
+ckpt_path: ../checkpoints/drone_control_model_classification.pth
+
+# Data configuration
+data_dir: datasets/imitation_data
+image_size: [224, 224]
+augment: False # Always false for inference
+
+# Logging configuration
+log_dir: recordings
+
+# Drone configuration
+group_number: 80 # Your group number
+camera_id: 1
+hover_height: 0.5
+fly_steps: 100
+crop_top: 80 # How much of the top of the camera image to crop out
