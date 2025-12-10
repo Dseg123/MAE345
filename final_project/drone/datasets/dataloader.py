@@ -10,6 +10,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
+from torchvision.transforms import v2
 from typing import List, Dict, Tuple, Optional
 
 
@@ -85,6 +86,7 @@ class CrazyflieILDataset(Dataset):
             raise ValueError(f"No trials found in {self.data_dir}")
         
         # Filter by trial numbers if specified
+        print(type(trial_numbers), trial_dirs)
         if trial_numbers is not None:
             trial_dirs = [d for d in trial_dirs 
                          if int(d.name.split('_')[1]) in trial_numbers]
@@ -94,13 +96,20 @@ class CrazyflieILDataset(Dataset):
             trial_data = self._load_single_trial(trial_dir)
             if trial_data is not None:
                 self.trials.append(trial_data)
-                
-                # Add samples from this trial
+
+                # Add samples from this trial, but only if image exists
                 for i in range(len(trial_data['data_log'])):
-                    self.samples.append({
-                        'trial_idx': len(self.trials) - 1,
-                        'sample_idx': i
-                    })
+                    entry = trial_data['data_log'][i]
+                    image_path = trial_data['trial_dir'] / entry['image_path']
+
+                    # Only add sample if image file exists
+                    if image_path.exists():
+                        self.samples.append({
+                            'trial_idx': len(self.trials) - 1,
+                            'sample_idx': i
+                        })
+                    else:
+                        print(f"Warning: Skipping frame {i} in {trial_dir.name} - image not found: {entry['image_path']}")
     
     def _load_single_trial(self, trial_dir: Path) -> Optional[Dict]:
         """Load a single trial's data."""
@@ -179,16 +188,20 @@ class CrazyflieILDataset(Dataset):
         if self.augment:
             # TODO: Add augmentation for training
             transform_list.extend([
-                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+                transforms.ColorJitter(brightness=0.7, contrast=0.7, saturation=0.3),
+                transforms.RandomHorizontalFlip(p=0.3),
+                transforms.RandomRotation(degrees=12),
+                transforms.RandomInvert(p=0.1),
             ])
         
         transform_list.append(transforms.ToTensor())
         
         if self.normalize_images:
             # Normalize to [-1, 1] (ImageNet stats could also be used)
-            transform_list.append(
-                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-            )
+            transform_list.extend([
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+                v2.GaussianNoise(sigma=0.07)
+            ])
         
         self.transform = transforms.Compose(transform_list)
     
@@ -271,8 +284,10 @@ def create_dataloaders(
     image_size: Tuple[int, int] = (224, 224),
     normalize_states: bool = True,
     normalize_actions: bool = False,
+    normalize_images: bool = True,
     num_workers: int = 4,
-    shuffle_train: bool = True
+    shuffle_train: bool = True,
+    augment: bool = True
 ) -> Tuple[DataLoader, DataLoader]:
     """
     Create train and validation dataloaders.
@@ -311,17 +326,17 @@ def create_dataloaders(
         data_dir=data_dir,
         trial_numbers=train_trials,
         image_size=image_size,
-        normalize_images=True,
+        normalize_images=normalize_images,
         normalize_states=normalize_states,
         normalize_actions=normalize_actions,
-        augment=True  # Use augmentation for training
+        augment=augment  # Use augmentation for training
     )
     
     val_dataset = CrazyflieILDataset(
         data_dir=data_dir,
         trial_numbers=val_trials,
         image_size=image_size,
-        normalize_images=True,
+        normalize_images=normalize_images,
         normalize_states=normalize_states,
         normalize_actions=normalize_actions,
         augment=False  # No augmentation for validation

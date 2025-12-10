@@ -1,0 +1,41 @@
+defaults:
+  - models: discrete_action_model
+  - _self_
+  # To switch models, comment/uncomment:
+  # - models: continuous_action_model
+
+# Experiment directory (set by SLURM script or command line)
+experiment_dir: null
+
+dataset:
+  data_dir: /home/de7281/MAE345/final_project/drone/datasets/imitation_data
+  image_size: [224, 224]
+  augment: True
+  normalize_states: False
+  normalize_images: True
+  normalize_actions: False
+
+training:
+  train_trials: null
+  val_trials: null
+  batch_size: 32
+  num_epochs: 1
+  lr: 0.001
+  num_workers: 0  # Use 0 to avoid multiprocessing issues on cluster
+  shuffle_train: True
+
+  
+
+# Logging configuration
+log_dir: recordings
+
+# Drone configuration
+group_number: 5 # Your group number
+camera_id: 1
+hover_height: 0.5
+fly_steps: 100
+crop_top: 80 # How much of the top of the camera image to crop out
+
+
+
+

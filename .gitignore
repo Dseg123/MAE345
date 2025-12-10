@@ -1,3 +1,6 @@
+final_project/drone/datasets/imitation_data/*
+final_project/drone/scripts/outputs/*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

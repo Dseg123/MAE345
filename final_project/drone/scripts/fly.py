@@ -22,6 +22,7 @@ def main(cfg):
     # ----------------------------------------------------------------------- #
     #  Load and initialize model
     # ----------------------------------------------------------------------- #
+    print("HI")
     model = instantiate(cfg.models)
 
     ckpt_path = cfg.ckpt_path

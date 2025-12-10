@@ -519,4 +519,4 @@ if __name__ == '__main__':
         analyze_trial(trial_path)
     else:
         # Analyze all trials
-        analyze_all_trials()
+        analyze_all_trials(data_dir='/home/de7281/MAE345/final_project/drone/datasets/imitation_data')

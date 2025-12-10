@@ -1,0 +1,47 @@
+defaults:
+  - models: discrete_action_model
+  - _self_
+
+# Test config without defaults composition
+# No defaults list - all config inline
+
+experiment_dir: null
+
+
+
+# # Inline model config
+# models:
+#   _target_: drone.models.discrete_action_model.DiscreteActionModel
+#   pretrained: false
+#   action_dim: 4
+#   num_bins: 11
+#   action_low: -0.2
+#   action_high: 0.2
+#   output_space: discrete
+
+dataset:
+  data_dir: /home/de7281/MAE345/final_project/drone/datasets/imitation_data
+  image_size: [224, 224]
+  augment: True
+  normalize_states: False
+  normalize_images: True
+  normalize_actions: False
+
+training:
+  train_trials: null
+  val_trials: null
+  batch_size: 32
+  num_epochs: 50
+  lr: 0.001
+  num_workers: 8
+  shuffle_train: True
+
+log_dir: recordings
+group_number: 5
+camera_id: 1
+hover_height: 0.5
+fly_steps: 100
+crop_top: 80
+
+
+ckpt_path: /home/de7281/MAE345/final_project/drone/trained_models/model.pth

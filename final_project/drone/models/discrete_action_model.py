@@ -111,7 +111,11 @@ class DiscreteActionModel(nn.Module):
         Returns:
             (B, A) tensor of continuous actions.
         """
-        # TODO: implement this function
+        # normalize bin indices to [0, 1]
+        norm = (bins + 0.5) / (self.num_bins)
+        # scale to [action_low, action_high]
+        continuous = norm * (self.action_high - self.action_low) + self.action_low
+        return continuous
     
     def output_to_executable_actions(self, output: torch.Tensor) -> torch.Tensor:
         """Convert model output logits to executable continuous actions.
@@ -122,4 +126,8 @@ class DiscreteActionModel(nn.Module):
         Returns:
             (B, action_dim) tensor of continuous actions.
         """
-        # TODO: implement this function
+        # find the bin with maximum logit for each action dimension
+        bins = torch.argmax(output, dim=-1)  # (B, action_dim)
+        # convert bin indices to continuous actions
+        continuous = self.bins_to_continuous(bins)
+        return continuous

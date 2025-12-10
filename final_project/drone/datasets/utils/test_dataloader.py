@@ -18,7 +18,7 @@ def test_basic_loading():
     
     try:
         dataset = CrazyflieILDataset(
-            data_dir='imitation_data',
+            data_dir='/home/de7281/MAE345/final_project/drone/datasets/imitation_data',
             image_size=(224, 224),
             normalize_states=True,
             normalize_actions=False
@@ -128,7 +128,7 @@ def test_multiple_trials():
     
     # Try loading just trial 1
     dataset_single = CrazyflieILDataset(
-        data_dir='imitation_data',
+        data_dir='/home/de7281/MAE345/final_project/drone/datasets/imitation_data',
         trial_numbers=[1],
         image_size=(224, 224)
     )
@@ -137,7 +137,7 @@ def test_multiple_trials():
     
     # Try loading all trials
     dataset_all = CrazyflieILDataset(
-        data_dir='imitation_data',
+        data_dir='/home/de7281/MAE345/final_project/drone/datasets/imitation_data',
         trial_numbers=None,  # All trials
         image_size=(224, 224)
     )
@@ -153,7 +153,7 @@ def test_train_val_split():
     
     try:
         train_loader, val_loader = create_dataloaders(
-            data_dir='imitation_data',
+            data_dir='/home/de7281/MAE345/final_project/drone/datasets/imitation_data',
             batch_size=8,
             image_size=(224, 224),
             num_workers=0  # Use 0 for testing
@@ -217,7 +217,7 @@ def visualize_samples(dataset, num_samples=4):
     plt.tight_layout()
     
     # Save figure
-    output_path = Path('imitation_data') / 'dataloader_test_samples.png'
+    output_path = Path('/home/de7281/MAE345/final_project/drone/datasets/imitation_data') / 'dataloader_test_samples.png'
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"✓ Visualization saved to: {output_path}")
     plt.close()

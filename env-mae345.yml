@@ -3,10 +3,10 @@ channels:
   - defaults
   - conda-forge
 dependencies:
-  - python=3.9
+  - python=3.11
   - sympy
   - numpy
-  - scipy=1.5.2
+  - scipy=1.10  # newer version compatible with Python 3.11
   - matplotlib
   - notebook
   - jupyterlab
