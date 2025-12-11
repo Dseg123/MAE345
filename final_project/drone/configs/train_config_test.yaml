@@ -20,7 +20,7 @@ experiment_dir: null
 #   output_space: discrete
 
 dataset:
-  data_dir: /home/de7281/MAE345/final_project/drone/datasets/imitation_data
+  data_dir: drone/datasets/imitation_data
   image_size: [224, 224]
   augment: True
   normalize_states: False
@@ -38,10 +38,10 @@ training:
 
 log_dir: recordings
 group_number: 5
-camera_id: 1
+camera_id: 0
 hover_height: 0.5
 fly_steps: 100
 crop_top: 80
 
 
-ckpt_path: /home/de7281/MAE345/final_project/drone/trained_models/model.pth
+ckpt_path: drone/trained_models/model.pth

@@ -51,6 +51,54 @@ def initialize_model(cfg: DictConfig) -> nn.Module:
     return model
 
 
+def continuous_to_bins(actions: torch.Tensor, cfg: DictConfig) -> torch.Tensor:
+    """Convert continuous actions to bin indices.
+
+    Args:
+        actions: (B, action_dim) tensor of continuous actions
+        cfg: Configuration object with models config
+
+    Returns:
+        (B, action_dim) LongTensor of bin indices
+    """
+    clipped = actions.clamp(min=cfg.models.action_low, max=cfg.models.action_high)
+    norm = (clipped - cfg.models.action_low) / (cfg.models.action_high - cfg.models.action_low)
+    bin_labels = (norm * (cfg.models.num_bins - 1)).round().long()
+    return bin_labels
+
+
+def compute_bin_accuracy(outputs: torch.Tensor, labels: torch.Tensor, cfg: DictConfig) -> Tuple[float, torch.Tensor]:
+    """Compute bin-wise accuracy for discrete action models.
+
+    Args:
+        outputs: Model outputs (B, action_dim, num_bins) logits
+        labels: Ground-truth continuous actions (B, action_dim)
+        cfg: Configuration object with models config
+
+    Returns:
+        Tuple of (overall_accuracy, per_action_accuracy)
+        - overall_accuracy: float, fraction of correct bin predictions across all actions
+        - per_action_accuracy: (action_dim,) tensor with accuracy per action dimension
+    """
+    if cfg.models.output_space != 'discrete':
+        return 0.0, torch.zeros(1)
+
+    # Convert continuous labels to bin indices
+    bin_labels = continuous_to_bins(labels, cfg)  # (B, action_dim)
+
+    # Get predicted bins (argmax of logits)
+    predicted_bins = torch.argmax(outputs, dim=-1)  # (B, action_dim)
+
+    # Compute overall accuracy
+    correct = (predicted_bins == bin_labels).float()
+    overall_accuracy = correct.mean().item()
+
+    # Compute per-action accuracy
+    per_action_accuracy = correct.mean(dim=0)  # (action_dim,)
+
+    return overall_accuracy, per_action_accuracy
+
+
 def loss_fn(outputs: torch.Tensor, labels: torch.Tensor, cfg: DictConfig) -> torch.Tensor:
     """Loss function for training.
 
@@ -67,9 +115,7 @@ def loss_fn(outputs: torch.Tensor, labels: torch.Tensor, cfg: DictConfig) -> tor
         # labels: (B, action_dim) continuous actions
 
         # Convert continuous labels to bin indices
-        clipped = labels.clamp(min=cfg.models.action_low, max=cfg.models.action_high)
-        norm = (clipped - cfg.models.action_low) / (cfg.models.action_high - cfg.models.action_low)
-        bin_labels = (norm * (cfg.models.num_bins - 1)).round().long()
+        bin_labels = continuous_to_bins(labels, cfg)
 
         # Flatten and compute cross-entropy
         B, action_dim, num_bins = outputs.shape
@@ -150,7 +196,9 @@ def train(config: DictConfig) -> Tuple[nn.Module, Dict[str, Any]]:
     history = {
         'train_losses': [],
         'val_losses': [],
+        'val_accuracies': [],
         'best_val_loss': float('inf'),
+        'best_val_accuracy': 0.0,
         'best_epoch': 0
     }
     sys.stdout.flush()
@@ -210,7 +258,9 @@ def train(config: DictConfig) -> Tuple[nn.Module, Dict[str, Any]]:
         # ============= Validation Phase =============
         model.eval()
         val_loss = 0.0
+        val_accuracy = 0.0
         val_batches = 0
+        val_per_action_acc = torch.zeros(config.models.action_dim)
 
         print("\nStarting validation...")
         iterator = iter(val_loader)
@@ -228,31 +278,55 @@ def train(config: DictConfig) -> Tuple[nn.Module, Dict[str, Any]]:
                 # Compute loss
                 loss = loss_fn(outputs, actions, config)
 
+                # Compute accuracy (for discrete models)
+                batch_acc, batch_per_action_acc = compute_bin_accuracy(outputs, actions, config)
+
                 # Track metrics
                 val_loss += loss.item()
+                val_accuracy += batch_acc
+                val_per_action_acc += batch_per_action_acc.cpu()
                 val_batches += 1
 
-                print(f"Val loss: {loss.item():.4f}")
+                print(f"Val loss: {loss.item():.4f}, Acc: {batch_acc:.4f}")
 
-        # Average validation loss
+        # Average validation metrics
         avg_val_loss = val_loss / val_batches
-        history['val_losses'].append(avg_val_loss)
+        avg_val_accuracy = val_accuracy / val_batches
+        avg_per_action_acc = val_per_action_acc / val_batches
 
-        # Track best model
-        if avg_val_loss < history['best_val_loss']:
-            history['best_val_loss'] = avg_val_loss
-            history['best_epoch'] = epoch
+        history['val_losses'].append(avg_val_loss)
+        history['val_accuracies'].append(avg_val_accuracy)
+
+        # Track best model (by accuracy for discrete, by loss for continuous)
+        if config.models.output_space == 'discrete':
+            if avg_val_accuracy > history['best_val_accuracy']:
+                history['best_val_accuracy'] = avg_val_accuracy
+                history['best_val_loss'] = avg_val_loss
+                history['best_epoch'] = epoch
+        else:
+            if avg_val_loss < history['best_val_loss']:
+                history['best_val_loss'] = avg_val_loss
+                history['best_epoch'] = epoch
 
         # Print epoch summary
         print(f"\nEpoch {epoch+1}/{config.training.num_epochs} Summary:")
         print(f"  Train Loss: {avg_train_loss:.4f}")
         print(f"  Val Loss:   {avg_val_loss:.4f}")
-        print(f"  Best Val Loss: {history['best_val_loss']:.4f} (Epoch {history['best_epoch']+1})")
+        if config.models.output_space == 'discrete':
+            print(f"  Val Accuracy: {avg_val_accuracy:.4f} ({avg_val_accuracy*100:.2f}%)")
+            action_names = ['vx', 'vy', 'vz', 'yaw_rate']
+            for i, name in enumerate(action_names):
+                print(f"    {name}: {avg_per_action_acc[i]:.4f}")
+            print(f"  Best Val Acc: {history['best_val_accuracy']:.4f} (Epoch {history['best_epoch']+1})")
+        else:
+            print(f"  Best Val Loss: {history['best_val_loss']:.4f} (Epoch {history['best_epoch']+1})")
         print("-" * 80)
 
     print("\n" + "=" * 80)
     print("Training complete!")
     print(f"Best validation loss: {history['best_val_loss']:.4f} at epoch {history['best_epoch']+1}")
+    if config.models.output_space == 'discrete':
+        print(f"Best validation accuracy: {history['best_val_accuracy']:.4f} ({history['best_val_accuracy']*100:.2f}%)")
     print("=" * 80)
 
     return model, history
@@ -294,7 +368,9 @@ def evaluate(model: nn.Module, config: DictConfig) -> Dict[str, float]:
 
     # Evaluation metrics
     total_loss = 0.0
+    total_accuracy = 0.0
     total_batches = 0
+    total_per_action_acc = torch.zeros(config.models.action_dim)
 
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Evaluating"):
@@ -308,20 +384,40 @@ def evaluate(model: nn.Module, config: DictConfig) -> Dict[str, float]:
             # Compute loss
             loss = loss_fn(outputs, actions, config)
 
+            # Compute accuracy (for discrete models)
+            batch_acc, batch_per_action_acc = compute_bin_accuracy(outputs, actions, config)
+
             # Track metrics
             total_loss += loss.item()
+            total_accuracy += batch_acc
+            total_per_action_acc += batch_per_action_acc.cpu()
             total_batches += 1
 
     # Compute average metrics
     avg_loss = total_loss / total_batches
+    avg_accuracy = total_accuracy / total_batches
+    avg_per_action_acc = total_per_action_acc / total_batches
 
     metrics = {
         'val_loss': avg_loss,
+        'val_accuracy': avg_accuracy,
         'num_batches': total_batches,
         'num_samples': total_batches * config.training.batch_size
     }
 
+    # Add per-action accuracies for discrete models
+    if config.models.output_space == 'discrete':
+        action_names = ['vx', 'vy', 'vz', 'yaw_rate']
+        for i, name in enumerate(action_names):
+            metrics[f'val_accuracy_{name}'] = avg_per_action_acc[i].item()
+
     print(f"\nValidation Loss: {avg_loss:.4f}")
+    if config.models.output_space == 'discrete':
+        print(f"Validation Accuracy: {avg_accuracy:.4f} ({avg_accuracy*100:.2f}%)")
+        print("\nPer-action accuracy:")
+        action_names = ['vx', 'vy', 'vz', 'yaw_rate']
+        for i, name in enumerate(action_names):
+            print(f"  {name}: {avg_per_action_acc[i]:.4f} ({avg_per_action_acc[i]*100:.2f}%)")
     print(f"Total samples evaluated: {metrics['num_samples']}")
     print("=" * 80)
 
@@ -409,6 +505,17 @@ def train_and_evaluate(cfg: DictConfig) -> None:
         'num_epochs': cfg.training.num_epochs,
         'num_samples': metrics['num_samples']
     }
+
+    # Add accuracy metrics for discrete models
+    if cfg.models.output_space == 'discrete':
+        summary['final_val_accuracy'] = history['val_accuracies'][-1]
+        summary['best_val_accuracy'] = history['best_val_accuracy']
+        summary['eval_accuracy'] = metrics['val_accuracy']
+        # Add per-action accuracies
+        action_names = ['vx', 'vy', 'vz', 'yaw_rate']
+        for name in action_names:
+            if f'val_accuracy_{name}' in metrics:
+                summary[f'eval_accuracy_{name}'] = metrics[f'val_accuracy_{name}']
 
     summary_path = experiment_dir / "results" / "summary.json"
     with open(summary_path, 'w') as f:

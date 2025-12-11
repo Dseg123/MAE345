@@ -3,9 +3,11 @@
 #SBATCH --time=04:00:00              # Time limit (4 hours)
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
+#SBATCH --partition=mig
+
 
 # Define scratch directory
 SCRATCH_DIR=/scratch/gpfs/TSILVER/de7281/MAE345
@@ -60,7 +62,7 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 
 # Navigate to script directory
-cd /home/de7281/MAE345/final_project/drone/scripts
+cd /home/de7281/MAE345/final_project
 
 echo "hello"
 # Run training with Hydra
@@ -72,10 +74,11 @@ echo "hello"
 #   Use pretrained:      models.pretrained=true
 #   Change action range: models.action_low=-0.5 models.action_high=0.5
 #
-python training.py \
+python drone/scripts/training.py \
     --config-name=train_config_test \
-    training.lr=0.0001 \
+    training.lr=0.001 \
     training.batch_size=32 \
+    training.num_epochs=20 \
     experiment_dir=${EXPERIMENT_DIR} \
 
 echo "End time: $(date)"

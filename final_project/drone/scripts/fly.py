@@ -40,9 +40,9 @@ def main(cfg):
     # ----------------------------------------------------------------------- #
 
     dataset = CrazyflieILDataset(
-        data_dir=cfg.data_dir,
-        image_size=cfg.image_size,
-        augment=cfg.augment,
+        data_dir=cfg.dataset.data_dir,
+        image_size=cfg.dataset.image_size,
+        augment=cfg.dataset.augment,
     )
     transform = dataset.transform  # match dataset transforms
 
@@ -133,7 +133,7 @@ if __name__ == "__main__":
         "--config_name",
         type=str, 
         required=False,
-        default="example_fly_config",
+        default="train_config_test",
         help="Name of the config file"
     )
     

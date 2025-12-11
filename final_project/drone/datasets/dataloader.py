@@ -11,7 +11,58 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 from torchvision.transforms import v2
+import torchvision.transforms.functional as TF
 from typing import List, Dict, Tuple, Optional
+import random
+
+
+class CoupledAugmentation:
+    """
+    Custom augmentation class that applies random flips to both images and actions.
+
+    When an image is flipped, the corresponding action must also be modified:
+    - Horizontal flip (left-right): negate vy (lateral velocity) and yaw_rate
+    - Vertical flip (top-bottom): negate vz (vertical velocity)
+
+    Actions are: [vx, vy, vz, yaw_rate]
+    """
+
+    def __init__(self, horizontal_flip_prob=0.3, vertical_flip_prob=0.3):
+        """
+        Args:
+            horizontal_flip_prob: Probability of horizontal (left-right) flip
+            vertical_flip_prob: Probability of vertical (top-bottom) flip
+        """
+        self.horizontal_flip_prob = horizontal_flip_prob
+        self.vertical_flip_prob = vertical_flip_prob
+
+    def __call__(self, image, action):
+        """
+        Apply coupled augmentation to image and action.
+
+        Args:
+            image: PIL Image or torch.Tensor
+            action: torch.Tensor of shape (4,) containing [vx, vy, vz, yaw_rate]
+
+        Returns:
+            augmented_image, augmented_action
+        """
+        action = action.clone()  # Don't modify original
+
+        # Horizontal flip (left-right)
+        if random.random() < self.horizontal_flip_prob:
+            image = TF.hflip(image)
+            # Negate vy (index 1) and yaw_rate (index 3)
+            action[1] = -action[1]  # vy: left becomes right
+            action[3] = -action[3]  # yaw_rate: CW becomes CCW
+
+        # Vertical flip (top-bottom)
+        if random.random() < self.vertical_flip_prob:
+            image = TF.vflip(image)
+            # Negate vz (index 2)
+            action[2] = -action[2]  # vz: up becomes down
+
+        return image, action
 
 
 class CrazyflieILDataset(Dataset):
@@ -180,30 +231,43 @@ class CrazyflieILDataset(Dataset):
     
     def _setup_transforms(self):
         """Setup image preprocessing transforms."""
-        transform_list = [
+        # Basic transforms (always applied)
+        basic_transform_list = [
             transforms.ToPILImage(),
             transforms.Resize(self.image_size),
         ]
-        
+        self.basic_transform = transforms.Compose(basic_transform_list)
+
+        # Coupled augmentation (flips that affect actions)
         if self.augment:
-            # TODO: Add augmentation for training
-            transform_list.extend([
+            self.coupled_aug = CoupledAugmentation(
+                horizontal_flip_prob=0.3,
+                vertical_flip_prob=0.3
+            )
+        else:
+            self.coupled_aug = None
+
+        # Additional augmentations (don't affect actions)
+        additional_aug_list = []
+        if self.augment:
+            additional_aug_list.extend([
                 transforms.ColorJitter(brightness=0.7, contrast=0.7, saturation=0.3),
-                transforms.RandomHorizontalFlip(p=0.3),
                 transforms.RandomRotation(degrees=12),
                 transforms.RandomInvert(p=0.1),
             ])
-        
-        transform_list.append(transforms.ToTensor())
-        
+
+        # Final transforms (always applied)
+        final_transform_list = [transforms.ToTensor()]
+
         if self.normalize_images:
             # Normalize to [-1, 1] (ImageNet stats could also be used)
-            transform_list.extend([
+            final_transform_list.extend([
                 transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
                 v2.GaussianNoise(sigma=0.07)
             ])
-        
-        self.transform = transforms.Compose(transform_list)
+
+        self.additional_aug = transforms.Compose(additional_aug_list) if additional_aug_list else None
+        self.final_transform = transforms.Compose(final_transform_list)
     
     def __len__(self) -> int:
         """Return the total number of samples."""
@@ -212,7 +276,7 @@ class CrazyflieILDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
         Get a single sample.
-        
+
         Returns:
             dict with keys:
                 - 'observation': Image tensor [3, H, W]
@@ -222,19 +286,33 @@ class CrazyflieILDataset(Dataset):
         sample_info = self.samples[idx]
         trial = self.trials[sample_info['trial_idx']]
         entry = trial['data_log'][sample_info['sample_idx']]
-        
+
         # Load and process image
         image_path = trial['trial_dir'] / entry['image_path']
         image = cv2.imread(str(image_path))
         if image is None:
             raise ValueError(f"Failed to load image: {image_path}")
-        
+
         # Convert BGR to RGB
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        
-        # Apply transforms
-        observation = self.transform(image)
-        
+
+        # Extract action vector
+        action = torch.FloatTensor(entry['action'])
+
+        # Apply basic transforms (resize, etc.)
+        image = self.basic_transform(image)
+
+        # Apply coupled augmentation (flips that affect both image and action)
+        if self.coupled_aug is not None:
+            image, action = self.coupled_aug(image, action)
+
+        # Apply additional augmentations (color jitter, rotation, etc.)
+        if self.additional_aug is not None:
+            image = self.additional_aug(image)
+
+        # Apply final transforms (to tensor, normalization)
+        observation = self.final_transform(image)
+
         # Extract state vector
         state = torch.FloatTensor([
             entry['state']['x'],
@@ -247,18 +325,15 @@ class CrazyflieILDataset(Dataset):
             entry['state']['pitch'],
             entry['state']['yaw']
         ])
-        
+
         # Normalize state if needed
         if self.normalize_states and self.state_stats is not None:
             state = (state - self.state_stats['mean']) / self.state_stats['std']
-        
-        # Extract action vector
-        action = torch.FloatTensor(entry['action'])
-        
+
         # Normalize action if needed
         if self.normalize_actions and self.action_stats is not None:
             action = (action - self.action_stats['mean']) / self.action_stats['std']
-        
+
         return {
             'observation': observation,
             'state': state,
