@@ -6,15 +6,14 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
-#SBATCH --partition=mig
+#SBATCH --partition=gpu-ee
 
 
 # Define scratch directory
 SCRATCH_DIR=/scratch/gpfs/TSILVER/de7281/MAE345
 
-# Create timestamped experiment directory
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-EXPERIMENT_DIR=${SCRATCH_DIR}/run_${TIMESTAMP}
+# Create experiment directory using SLURM job ID
+EXPERIMENT_DIR=${SCRATCH_DIR}/job_${SLURM_JOB_ID}
 
 # Create directory structure
 mkdir -p ${EXPERIMENT_DIR}/logs
@@ -76,10 +75,14 @@ echo "hello"
 #
 python drone/scripts/training.py \
     --config-name=train_config_test \
-    training.lr=0.001 \
+    training.lr=1e-3 \
     training.batch_size=32 \
     training.num_epochs=20 \
+    training.weight_decay=1e-5 \
+    training.early_stopping_patience=3 \
+    models.v3=false \
     experiment_dir=${EXPERIMENT_DIR} \
+
 
 echo "End time: $(date)"
 echo "Results saved to: ${EXPERIMENT_DIR}"

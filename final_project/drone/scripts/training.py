@@ -184,13 +184,21 @@ def train(config: DictConfig) -> Tuple[nn.Module, Dict[str, Any]]:
         print(f"GPU memory allocated: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
         print(f"GPU memory reserved: {torch.cuda.memory_reserved(0) / 1024**2:.2f} MB")
 
-    # Initialize optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.training.lr)
+    # Initialize optimizer with weight decay (L2 regularization)
+    weight_decay = config.training.get('weight_decay', 0.0)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.training.lr, weight_decay=weight_decay)
+    print(f"Optimizer: Adam(lr={config.training.lr}, weight_decay={weight_decay})")
 
     # Enable cudnn benchmarking for faster convolutions (if on GPU)
     if torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True
         print("Enabled cudnn.benchmark for faster GPU training")
+
+    # Early stopping setup
+    early_stopping_patience = config.training.get('early_stopping_patience', 10)
+    early_stopping_min_delta = config.training.get('early_stopping_min_delta', 0.001)
+    epochs_without_improvement = 0
+    print(f"Early stopping: patience={early_stopping_patience}, min_delta={early_stopping_min_delta}")
 
     # Training history
     history = {
@@ -199,13 +207,15 @@ def train(config: DictConfig) -> Tuple[nn.Module, Dict[str, Any]]:
         'val_accuracies': [],
         'best_val_loss': float('inf'),
         'best_val_accuracy': 0.0,
-        'best_epoch': 0
+        'best_epoch': 0,
+        'stopped_early': False,
+        'total_epochs_run': 0
     }
     sys.stdout.flush()
 
     # Training loop
     print("\n" + "=" * 80)
-    print(f"Training for {config.training.num_epochs} epochs")
+    print(f"Training for up to {config.training.num_epochs} epochs")
     print("=" * 80)
     sys.stdout.flush()
 
@@ -281,6 +291,16 @@ def train(config: DictConfig) -> Tuple[nn.Module, Dict[str, Any]]:
                 # Compute accuracy (for discrete models)
                 batch_acc, batch_per_action_acc = compute_bin_accuracy(outputs, actions, config)
 
+                # DEBUG: Print detailed accuracy info for first batch
+                if val_batches == 0:
+                    predicted_bins = torch.argmax(outputs, dim=-1)
+                    true_bins = continuous_to_bins(actions, config)
+                    print(f"  DEBUG - First batch predictions:")
+                    print(f"    Predicted bins sample: {predicted_bins[0].cpu().numpy()}")
+                    print(f"    True bins sample: {true_bins[0].cpu().numpy()}")
+                    print(f"    Output logits sample: {outputs[0, :, :].cpu().detach().numpy()}")
+                    print(f"    Batch accuracy: {batch_acc:.4f}")
+
                 # Track metrics
                 val_loss += loss.item()
                 val_accuracy += batch_acc
@@ -297,16 +317,49 @@ def train(config: DictConfig) -> Tuple[nn.Module, Dict[str, Any]]:
         history['val_losses'].append(avg_val_loss)
         history['val_accuracies'].append(avg_val_accuracy)
 
-        # Track best model (by accuracy for discrete, by loss for continuous)
-        if config.models.output_space == 'discrete':
-            if avg_val_accuracy > history['best_val_accuracy']:
+        # Track best model and check for early stopping (based on val loss)
+        improved = False
+        if avg_val_loss < history['best_val_loss'] - early_stopping_min_delta:
+            # Significant improvement in validation loss
+            improved = True
+            epochs_without_improvement = 0
+            history['best_val_loss'] = avg_val_loss
+            history['best_epoch'] = epoch
+
+            # Also track best accuracy for discrete models
+            if config.models.output_space == 'discrete':
                 history['best_val_accuracy'] = avg_val_accuracy
-                history['best_val_loss'] = avg_val_loss
-                history['best_epoch'] = epoch
+
+            # Save best model checkpoint
+            checkpoint_dir = Path(config.experiment_dir) / "checkpoints"
+            checkpoint_dir.mkdir(exist_ok=True)
+
+            # Remove previous best checkpoint to save space
+            for old_ckpt in checkpoint_dir.glob("best_model_epoch_*.pth"):
+                old_ckpt.unlink()
+
+            # Save new best checkpoint
+            best_ckpt_path = checkpoint_dir / f"best_model_epoch_{epoch+1}.pth"
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': avg_val_loss,
+                'val_accuracy': avg_val_accuracy if config.models.output_space == 'discrete' else None,
+                'config': OmegaConf.to_container(config, resolve=True)
+            }, best_ckpt_path)
+            print(f"  💾 Saved best model checkpoint: {best_ckpt_path.name}")
+
         else:
-            if avg_val_loss < history['best_val_loss']:
-                history['best_val_loss'] = avg_val_loss
-                history['best_epoch'] = epoch
+            # No improvement
+            epochs_without_improvement += 1
+
+            # For discrete models, also update best accuracy if it improved
+            if config.models.output_space == 'discrete' and avg_val_accuracy > history['best_val_accuracy']:
+                history['best_val_accuracy'] = avg_val_accuracy
+
+        # Update total epochs run
+        history['total_epochs_run'] = epoch + 1
 
         # Print epoch summary
         print(f"\nEpoch {epoch+1}/{config.training.num_epochs} Summary:")
@@ -318,12 +371,29 @@ def train(config: DictConfig) -> Tuple[nn.Module, Dict[str, Any]]:
             for i, name in enumerate(action_names):
                 print(f"    {name}: {avg_per_action_acc[i]:.4f}")
             print(f"  Best Val Acc: {history['best_val_accuracy']:.4f} (Epoch {history['best_epoch']+1})")
+        print(f"  Best Val Loss: {history['best_val_loss']:.4f} (Epoch {history['best_epoch']+1})")
+
+        # Early stopping status
+        if improved:
+            print(f"  ✓ Validation loss improved!")
         else:
-            print(f"  Best Val Loss: {history['best_val_loss']:.4f} (Epoch {history['best_epoch']+1})")
+            print(f"  No improvement for {epochs_without_improvement} epoch(s)")
         print("-" * 80)
 
+        # Check early stopping condition
+        if epochs_without_improvement >= early_stopping_patience:
+            print("\n" + "=" * 80)
+            print(f"EARLY STOPPING triggered after {epoch+1} epochs")
+            print(f"No improvement in validation loss for {early_stopping_patience} consecutive epochs")
+            print("=" * 80)
+            history['stopped_early'] = True
+            break
+
     print("\n" + "=" * 80)
-    print("Training complete!")
+    if history['stopped_early']:
+        print(f"Training stopped early at epoch {history['total_epochs_run']}")
+    else:
+        print("Training complete!")
     print(f"Best validation loss: {history['best_val_loss']:.4f} at epoch {history['best_epoch']+1}")
     if config.models.output_space == 'discrete':
         print(f"Best validation accuracy: {history['best_val_accuracy']:.4f} ({history['best_val_accuracy']*100:.2f}%)")
@@ -467,13 +537,32 @@ def train_and_evaluate(cfg: DictConfig) -> None:
     sys.stdout.flush()
     model, history = train(cfg)
 
-    # Evaluate model
+    # Load best checkpoint for final evaluation and saving
+    checkpoint_dir = experiment_dir / "checkpoints"
+    best_checkpoint = list(checkpoint_dir.glob("best_model_epoch_*.pth"))
+
+    if best_checkpoint:
+        best_ckpt_path = best_checkpoint[0]
+        print(f"\nLoading best checkpoint from epoch {history['best_epoch']+1}: {best_ckpt_path.name}")
+        checkpoint = torch.load(best_ckpt_path, map_location='cpu')
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Best checkpoint val_loss: {checkpoint['val_loss']:.4f}")
+    else:
+        print(f"\nNo checkpoint found, using final model state")
+
+    # Evaluate best model
     metrics = evaluate(model, cfg)
 
-    # Save model
+    # Save final best model (clean state dict only)
     model_path = experiment_dir / "models" / "model.pth"
     torch.save(model.state_dict(), model_path)
-    print(f"\nModel saved to: {model_path}")
+    print(f"\nBest model saved to: {model_path}")
+
+    # Also copy the best checkpoint to models directory for reference
+    if best_checkpoint:
+        best_model_full_path = experiment_dir / "models" / "best_model_full.pth"
+        torch.save(checkpoint, best_model_full_path)
+        print(f"Full checkpoint saved to: {best_model_full_path}")
 
     # Save configuration
     config_save_path = experiment_dir / "configs" / "config.yaml"
