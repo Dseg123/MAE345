@@ -1,0 +1,30 @@
+defaults:
+  - models: discrete_action_model
+  - _self_
+
+# Ensemble mode configuration
+use_ensemble: false  # Set to true to use ensemble of two models
+
+# For single model mode (use_ensemble: false)
+ckpt_path: drone/trained_models/model.pth
+
+# For ensemble mode (use_ensemble: true)
+# Uncomment and set these paths when using ensemble
+# ckpt_path1: /scratch/gpfs/TSILVER/de7281/MAE345/job_2920235/checkpoints/best_model_epoch_10.pth
+# ckpt_path2: /scratch/gpfs/TSILVER/de7281/MAE345/job_2920370/checkpoints/best_model_epoch_8.pth
+
+dataset:
+  data_dir: drone/datasets/imitation_data
+  image_size: [224, 224]
+  augment: false  # No augmentation during inference
+  normalize_states: false
+  normalize_images: true
+  normalize_actions: false
+
+# Drone flight settings
+log_dir: recordings
+group_number: 5
+camera_index: 0
+hover_height: 0.5
+fly_steps: 100
+crop_top: 80

@@ -6,6 +6,7 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
+#SBATCH --partition=gpu-ee
 
 
 # Define scratch directory
@@ -80,8 +81,10 @@ python drone/scripts/training.py \
     training.weight_decay=0 \
     training.early_stopping_patience=3 \
     training.lr_patience=1 \
-    models.v3=false \
-    models.width_mult=0.5 \
+    training.nonzero_y_weight=1 \
+    models.v3=true \
+    models.width_mult=1 \
+    models.pretrained=true \
     experiment_dir=${EXPERIMENT_DIR} \
 
 

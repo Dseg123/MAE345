@@ -40,6 +40,7 @@ training:
   lr_factor: 0.5  # Reduce LR by 50% when plateauing
   lr_patience: 5  # Wait 5 epochs before reducing LR
   min_lr: 1.0e-6  # Don't reduce LR below this value
+  nonzero_y_weight: 1.0  # Weight non-zero vy (obstacle avoidance) 3x more
   num_workers: 8
   shuffle_train: True
 

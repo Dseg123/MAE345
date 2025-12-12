@@ -388,6 +388,7 @@ def create_dataloaders(
         all_trials = sorted([int(d.name.split('_')[1])
                            for d in data_path.iterdir()
                            if d.is_dir() and d.name.startswith('trial_')])
+        # all_trials = all_trials[:50]
 
         # Use 80-20 random split (with fixed seed for reproducibility)
         import random

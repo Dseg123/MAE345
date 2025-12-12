@@ -3,7 +3,7 @@ import torch.nn as nn
 from torchvision.models import mobilenet_v2, mobilenet_v3_small
 from torchvision.models.mobilenetv2 import MobileNetV2
 from typing import Optional
-
+from pathlib import Path
 
 # Training configuration
 num_bins = 11
@@ -49,7 +49,19 @@ class DiscreteActionModel(nn.Module):
         # Load backbone. When pretrained=False this will init random weights.
         if v3:
             # MobileNetV3 Small
-            self.backbone = mobilenet_v3_small(weights="IMAGENET1K_V1" if pretrained else None)
+            if pretrained:
+                # Try to load from local file first, fall back to downloading
+                pretrained_path = Path(__file__).parent.parent / "pretrained_weights" / "mobilenet_v3_small_imagenet.pth"
+                if pretrained_path.exists():
+                    print(f"Loading pretrained weights from: {pretrained_path}")
+                    self.backbone = mobilenet_v3_small(weights=None)
+                    self.backbone.load_state_dict(torch.load(pretrained_path, map_location='cpu'))
+                else:
+                    print("Pretrained weights not found locally, downloading...")
+                    self.backbone = mobilenet_v3_small(weights="IMAGENET1K_V1")
+            else:
+                self.backbone = mobilenet_v3_small(weights=None)
+
             # MobileNetV3 classifier: [0] Linear(576->1024), [1] Hardswish, [2] Dropout, [3] Linear(1024->1000)
             # Get input features from the FIRST Linear layer (feature extractor output)
             in_feature_dim = self.backbone.classifier[0].in_features  # 576
@@ -58,13 +70,21 @@ class DiscreteActionModel(nn.Module):
             # width_mult scales the number of channels (0.5 = half size, 0.75 = 3/4 size, etc.)
             # Pretrained weights only available for width_mult=1.0
             if pretrained and width_mult == 1.0:
-                self.backbone = mobilenet_v2(weights="IMAGENET1K_V1")
+                # Try to load from local file first, fall back to downloading
+                pretrained_path = Path(__file__).parent.parent / "pretrained_weights" / "mobilenet_v2_imagenet.pth"
+                if pretrained_path.exists():
+                    print(f"Loading pretrained weights from: {pretrained_path}")
+                    self.backbone = mobilenet_v2(weights=None)
+                    self.backbone.load_state_dict(torch.load(pretrained_path, map_location='cpu'))
+                else:
+                    print("Pretrained weights not found locally, downloading...")
+                    self.backbone = mobilenet_v2(weights="IMAGENET1K_V1")
             else:
                 self.backbone = MobileNetV2(width_mult=width_mult)
 
             # MobileNetV2 classifier: [0] Dropout, [1] Linear
             in_feature_dim = self.backbone.classifier[1].in_features
-            print(f"MobileNetV2 created: width_mult={width_mult}, in_features={in_feature_dim}")
+            print(f"MobileNetV2 created: width_mult={width_mult}, in_features={in_feature_dim}, pretrained={pretrained}")
 
         out_features = self.action_dim * self.num_bins
         # Replace classifier with a dropout + linear that outputs logits for all bins

@@ -20,20 +20,48 @@ from drone.datasets.dataloader import CrazyflieILDataset
 def main(cfg):
 
     # ----------------------------------------------------------------------- #
-    #  Load and initialize model
+    #  Load and initialize model(s)
     # ----------------------------------------------------------------------- #
     print("HI")
-    model = instantiate(cfg.models)
 
-    ckpt_path = cfg.ckpt_path
-    state_dict = torch.load(ckpt_path, map_location="cpu")
-    model.load_state_dict(state_dict)
-    model.eval()
+    # Check if we're using ensemble mode
+    use_ensemble = cfg.get('use_ensemble', False)
+
+    if use_ensemble:
+        # Load two models for ensemble
+        model1 = instantiate(cfg.models)
+        model2 = instantiate(cfg.models)
+
+        ckpt_path1 = cfg.ckpt_path1
+        ckpt_path2 = cfg.ckpt_path2
+
+        state_dict1 = torch.load(ckpt_path1, map_location="cpu")
+        state_dict2 = torch.load(ckpt_path2, map_location="cpu")
+
+        model1.load_state_dict(state_dict1)
+        model2.load_state_dict(state_dict2)
+
+        model1.eval()
+        model2.eval()
+
+        models = [model1, model2]
+        print(f"Loaded ensemble with 2 models from:\n  - {ckpt_path1}\n  - {ckpt_path2}")
+    else:
+        # Single model mode
+        model = instantiate(cfg.models)
+        ckpt_path = cfg.ckpt_path
+        state_dict = torch.load(ckpt_path, map_location="cpu")
+        model.load_state_dict(state_dict)
+        model.eval()
+        models = [model]
+        print(f"Loaded single model from: {ckpt_path}")
 
     # Select device
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Using device: {device}")
-    model.to(device)
+
+    for model in models:
+        model.to(device)
 
     # ----------------------------------------------------------------------- #
     #  Set up image transforms
@@ -95,11 +123,41 @@ def main(cfg):
 
             # ========== 3) Model inference ==========
             with torch.no_grad():
-                output = model(processed_image)
+                if use_ensemble:
+                    # Get predictions from both models
+                    output1 = models[0](processed_image)
+                    output2 = models[1](processed_image)
 
-            actions = model.output_to_executable_actions(output)
+                    actions1 = models[0].output_to_executable_actions(output1)
+                    actions2 = models[1].output_to_executable_actions(output2)
 
-            print(f"Step {i:03d} actions:", actions)
+                    # Ensemble strategy: take nonzero action if either model predicts nonzero
+                    # This increases sensitivity to obstacles
+                    actions = torch.zeros_like(actions1)
+                    for action_idx in range(actions1.shape[1]):
+                        val1 = actions1[0, action_idx].item()
+                        val2 = actions2[0, action_idx].item()
+
+                        # If either model predicts nonzero, use the nonzero value
+                        if val1 != 0.0 and val2 != 0.0:
+                            # Both nonzero: average them
+                            actions[0, action_idx] = (val1 + val2) / 2.0
+                        elif val1 != 0.0:
+                            # Only model1 nonzero
+                            actions[0, action_idx] = val1
+                        elif val2 != 0.0:
+                            # Only model2 nonzero
+                            actions[0, action_idx] = val2
+                        else:
+                            # Both zero: keep zero
+                            actions[0, action_idx] = 0.0
+
+                    print(f"Step {i:03d} actions: {actions} (m1: {actions1}, m2: {actions2})")
+                else:
+                    # Single model inference
+                    output = models[0](processed_image)
+                    actions = models[0].output_to_executable_actions(output)
+                    print(f"Step {i:03d} actions:", actions)
 
             # Append record to list
             action_records.append({

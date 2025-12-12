@@ -100,7 +100,7 @@ def compute_bin_accuracy(outputs: torch.Tensor, labels: torch.Tensor, cfg: DictC
 
 
 def loss_fn(outputs: torch.Tensor, labels: torch.Tensor, cfg: DictConfig) -> torch.Tensor:
-    """Loss function for training.
+    """Loss function for training with increased weight on non-zero y-coordinate examples.
 
     Args:
         outputs: Model outputs
@@ -115,14 +115,39 @@ def loss_fn(outputs: torch.Tensor, labels: torch.Tensor, cfg: DictConfig) -> tor
         # labels: (B, action_dim) continuous actions
 
         # Convert continuous labels to bin indices
-        bin_labels = continuous_to_bins(labels, cfg)
+        bin_labels = continuous_to_bins(labels, cfg)  # (B, action_dim)
 
-        # Flatten and compute cross-entropy
+        # Get weighting factor for non-zero y-coordinate samples
+        nonzero_y_weight = cfg.training.get('nonzero_y_weight', 1.0)
+
         B, action_dim, num_bins = outputs.shape
-        outputs_flat = outputs.reshape(B * action_dim, num_bins)
-        labels_flat = bin_labels.reshape(B * action_dim)
+        center_bin = (num_bins - 1) // 2  # Middle bin represents 0 action
 
-        loss = nn.functional.cross_entropy(outputs_flat, labels_flat)
+        # Create per-sample weights based on y-coordinate (index 1 = vy)
+        sample_weights = torch.ones(B, device=outputs.device)
+
+        # Identify samples with non-zero vy (obstacle avoidance maneuvers)
+        vy_bins = bin_labels[:, 1]  # Extract vy bins for all samples
+        nonzero_vy_mask = (vy_bins != center_bin)  # True where vy != 0
+
+        # Apply higher weight to non-zero vy samples
+        sample_weights[nonzero_vy_mask] = nonzero_y_weight
+
+        # Compute loss per action dimension, then weight by sample
+        total_loss = 0.0
+        for action_idx in range(action_dim):
+            action_outputs = outputs[:, action_idx, :]  # (B, num_bins)
+            action_labels = bin_labels[:, action_idx]  # (B,)
+
+            # Compute cross-entropy for this action dimension
+            action_loss = nn.functional.cross_entropy(action_outputs, action_labels, reduction='none')  # (B,)
+
+            # Weight by sample weights and average
+            weighted_action_loss = (action_loss * sample_weights).mean()
+            total_loss += weighted_action_loss
+
+        # Average across action dimensions
+        loss = total_loss / action_dim
         return loss
 
     elif cfg.models.output_space == 'continuous':
