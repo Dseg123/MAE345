@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torchvision.models import mobilenet_v2
+from torchvision.models import mobilenet_v2, mobilenet_v3_small
 from typing import Optional
 
 
@@ -35,7 +35,8 @@ class DiscreteActionModel(nn.Module):
                  action_dim: int = 4,
                  num_bins: int = 11,
                  action_low: Optional[float] = -1.0,
-                 action_high: Optional[float] = 1.0
+                 action_high: Optional[float] = 1.0,
+                 v3: bool = False
                  ):
         super().__init__()
         self.action_dim = int(action_dim)
@@ -43,9 +44,18 @@ class DiscreteActionModel(nn.Module):
         self.action_low = action_low
         self.action_high = action_high
 
-        # Load MobileNetV2 backbone. When pretrained=False this will init random weights.
-        self.backbone = mobilenet_v2(weights="IMAGENET1K_V1" if pretrained else None)
-        in_feature_dim = self.backbone.classifier[1].in_features
+        # Load backbone. When pretrained=False this will init random weights.
+        if v3:
+            # MobileNetV3 Small
+            self.backbone = mobilenet_v3_small(weights="IMAGENET1K_V1" if pretrained else None)
+            # MobileNetV3 classifier: [0] Linear(576->1024), [1] Hardswish, [2] Dropout, [3] Linear(1024->1000)
+            # Get input features from the FIRST Linear layer (feature extractor output)
+            in_feature_dim = self.backbone.classifier[0].in_features  # 576
+        else:
+            # MobileNetV2
+            self.backbone = mobilenet_v2(weights="IMAGENET1K_V1" if pretrained else None)
+            # MobileNetV2 classifier: [0] Dropout, [1] Linear
+            in_feature_dim = self.backbone.classifier[1].in_features  # 1280
 
         out_features = self.action_dim * self.num_bins
         # Replace classifier with a dropout + linear that outputs logits for all bins

@@ -251,7 +251,7 @@ class CrazyflieILDataset(Dataset):
         additional_aug_list = []
         if self.augment:
             additional_aug_list.extend([
-                transforms.ColorJitter(brightness=0.7, contrast=0.7, saturation=0.3),
+                transforms.ColorJitter(brightness=0.7, contrast=0.7, saturation=0.3, hue=0.3),
                 transforms.RandomRotation(degrees=12),
                 transforms.RandomInvert(p=0.1),
             ])
@@ -385,16 +385,23 @@ def create_dataloaders(
     # Auto-split trials if not specified
     if train_trials is None and val_trials is None:
         data_path = Path(data_dir)
-        all_trials = sorted([int(d.name.split('_')[1]) 
-                           for d in data_path.iterdir() 
+        all_trials = sorted([int(d.name.split('_')[1])
+                           for d in data_path.iterdir()
                            if d.is_dir() and d.name.startswith('trial_')])
-        
-        # Use 80-20 split
-        split_idx = int(len(all_trials) * 0.8)
-        train_trials = all_trials[:split_idx]
-        val_trials = all_trials[split_idx:]
-        
-        print(f"Auto-split: {len(train_trials)} train trials, {len(val_trials)} val trials")
+
+        # Use 80-20 random split (with fixed seed for reproducibility)
+        import random
+        random.seed(42)  # Fixed seed for reproducible splits
+        shuffled_trials = all_trials.copy()
+        random.shuffle(shuffled_trials)
+
+        split_idx = int(len(shuffled_trials) * 0.8)
+        train_trials = shuffled_trials[:split_idx]
+        val_trials = shuffled_trials[split_idx:]
+
+        print(f"Auto-split (random): {len(train_trials)} train trials, {len(val_trials)} val trials")
+        print(f"  Train trials: {sorted(train_trials)}")
+        print(f"  Val trials: {sorted(val_trials)}")
     
     # Create datasets
     train_dataset = CrazyflieILDataset(
