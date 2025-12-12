@@ -189,6 +189,21 @@ def train(config: DictConfig) -> Tuple[nn.Module, Dict[str, Any]]:
     optimizer = torch.optim.Adam(model.parameters(), lr=config.training.lr, weight_decay=weight_decay)
     print(f"Optimizer: Adam(lr={config.training.lr}, weight_decay={weight_decay})")
 
+    # Learning rate scheduler - reduce LR when validation loss plateaus
+    use_scheduler = config.training.get('use_lr_scheduler', True)
+    if use_scheduler:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=config.training.get('lr_factor', 0.5),  # Reduce LR by half
+            patience=config.training.get('lr_patience', 5),  # Wait 5 epochs before reducing
+            min_lr=config.training.get('min_lr', 1e-6)
+        )
+        print(f"LR Scheduler: ReduceLROnPlateau(factor={config.training.get('lr_factor', 0.5)}, patience={config.training.get('lr_patience', 5)})")
+    else:
+        scheduler = None
+        print("No LR scheduler")
+
     # Enable cudnn benchmarking for faster convolutions (if on GPU)
     if torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True
@@ -361,6 +376,12 @@ def train(config: DictConfig) -> Tuple[nn.Module, Dict[str, Any]]:
         # Update total epochs run
         history['total_epochs_run'] = epoch + 1
 
+        # Step the learning rate scheduler
+        if scheduler is not None:
+            scheduler.step(avg_val_loss)
+            current_lr = optimizer.param_groups[0]['lr']
+            history.setdefault('learning_rates', []).append(current_lr)
+
         # Print epoch summary
         print(f"\nEpoch {epoch+1}/{config.training.num_epochs} Summary:")
         print(f"  Train Loss: {avg_train_loss:.4f}")
@@ -372,6 +393,8 @@ def train(config: DictConfig) -> Tuple[nn.Module, Dict[str, Any]]:
                 print(f"    {name}: {avg_per_action_acc[i]:.4f}")
             print(f"  Best Val Acc: {history['best_val_accuracy']:.4f} (Epoch {history['best_epoch']+1})")
         print(f"  Best Val Loss: {history['best_val_loss']:.4f} (Epoch {history['best_epoch']+1})")
+        if scheduler is not None:
+            print(f"  Learning Rate: {current_lr:.2e}")
 
         # Early stopping status
         if improved:

@@ -6,3 +6,4 @@ action_low: -0.2
 action_high: 0.2
 output_space: discrete  # Metadata for loss function selection (not passed to constructor)
 v3: false
+width_mult: 1

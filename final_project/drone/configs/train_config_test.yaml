@@ -36,6 +36,10 @@ training:
   weight_decay: 0.0001  # L2 regularization (0.0001 is a good starting point)
   early_stopping_patience: 10  # Stop if no improvement for 10 epochs
   early_stopping_min_delta: 0.001  # Minimum improvement to count as progress
+  use_lr_scheduler: true  # Use ReduceLROnPlateau scheduler
+  lr_factor: 0.5  # Reduce LR by 50% when plateauing
+  lr_patience: 5  # Wait 5 epochs before reducing LR
+  min_lr: 1.0e-6  # Don't reduce LR below this value
   num_workers: 8
   shuffle_train: True
 

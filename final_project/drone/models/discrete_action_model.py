@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torchvision.models import mobilenet_v2, mobilenet_v3_small
+from torchvision.models.mobilenetv2 import MobileNetV2
 from typing import Optional
 
 
@@ -36,7 +37,8 @@ class DiscreteActionModel(nn.Module):
                  num_bins: int = 11,
                  action_low: Optional[float] = -1.0,
                  action_high: Optional[float] = 1.0,
-                 v3: bool = False
+                 v3: bool = False,
+                 width_mult: float = 1.0
                  ):
         super().__init__()
         self.action_dim = int(action_dim)
@@ -52,10 +54,17 @@ class DiscreteActionModel(nn.Module):
             # Get input features from the FIRST Linear layer (feature extractor output)
             in_feature_dim = self.backbone.classifier[0].in_features  # 576
         else:
-            # MobileNetV2
-            self.backbone = mobilenet_v2(weights="IMAGENET1K_V1" if pretrained else None)
+            # MobileNetV2 with custom width multiplier
+            # width_mult scales the number of channels (0.5 = half size, 0.75 = 3/4 size, etc.)
+            # Pretrained weights only available for width_mult=1.0
+            if pretrained and width_mult == 1.0:
+                self.backbone = mobilenet_v2(weights="IMAGENET1K_V1")
+            else:
+                self.backbone = MobileNetV2(width_mult=width_mult)
+
             # MobileNetV2 classifier: [0] Dropout, [1] Linear
-            in_feature_dim = self.backbone.classifier[1].in_features  # 1280
+            in_feature_dim = self.backbone.classifier[1].in_features
+            print(f"MobileNetV2 created: width_mult={width_mult}, in_features={in_feature_dim}")
 
         out_features = self.action_dim * self.num_bins
         # Replace classifier with a dropout + linear that outputs logits for all bins
